@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ExtensionAPI, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import moveExtension from "../extensions/index.js";
+import moveExtension from "../extensions/move.js";
 import { createNewSessionFile } from "../extensions/utils.js";
 
 describe("move extension", () => {
