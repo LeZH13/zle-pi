@@ -1,12 +1,25 @@
 {
-  "name": "@zle-pi/move",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@zle13/pi-move",
+  "version": "0.1.1",
   "description": "Pi extension to move between working directories with session resume or new session creation",
   "type": "module",
   "keywords": [
     "pi-package"
   ],
+  "author": "zle13",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeZH13/zle-pi.git",
+    "directory": "packages/move"
+  },
+  "files": [
+    "extensions",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
