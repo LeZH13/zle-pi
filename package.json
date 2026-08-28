@@ -1,0 +1,22 @@
+{
+  "name": "zle-pi-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "^0.84.3",
+    "@earendil-works/pi-ai": "^0.84.3",
+    "@earendil-works/pi-coding-agent": "^0.84.3",
+    "@earendil-works/pi-tui": "^0.84.3",
+    "@types/node": "^22.13.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.0"
+  }
+}
