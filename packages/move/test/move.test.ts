@@ -190,9 +190,10 @@ describe("move extension", () => {
 		const targetDir = join(tempDir, "empty-target");
 		mkdirSync(targetDir, { recursive: true });
 
+		const replacementNotifyMock = vi.fn();
 		const switchSessionMock = vi.fn().mockImplementation(async (sessionFile, options) => {
 			if (options?.withSession) {
-				const replacementCtx = { ui: { notify: vi.fn() } };
+				const replacementCtx = { ui: { notify: replacementNotifyMock } };
 				await options.withSession(replacementCtx);
 			}
 			return { cancelled: false };
@@ -210,6 +211,12 @@ describe("move extension", () => {
 		await command.handler(targetDir, mockCtx);
 		expect(selectMock).not.toHaveBeenCalled();
 		expect(switchSessionMock).toHaveBeenCalledWith(expect.stringMatching(/\.jsonl$/), expect.any(Object));
+
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(replacementNotifyMock).toHaveBeenCalledWith(
+			expect.stringContaining("(new session)"),
+			"info",
+		);
 	});
 
 	it("presents existing session options and switches to selected existing session", async () => {
@@ -240,7 +247,14 @@ describe("move extension", () => {
 			// Select the existing session (second option after new session)
 			return options[1];
 		});
-		const switchSessionMock = vi.fn().mockResolvedValue({ cancelled: false });
+		const replacementNotifyMock = vi.fn();
+		const switchSessionMock = vi.fn().mockImplementation(async (sessionFile, options) => {
+			if (options?.withSession) {
+				const replacementCtx = { ui: { notify: replacementNotifyMock } };
+				await options.withSession(replacementCtx);
+			}
+			return { cancelled: false };
+		});
 		const notifyMock = vi.fn();
 
 		const mockCtx = {
@@ -253,6 +267,12 @@ describe("move extension", () => {
 		await command.handler(targetDir, mockCtx);
 		expect(selectMock).toHaveBeenCalledWith(expect.stringContaining("Select session"), expect.any(Array));
 		expect(switchSessionMock).toHaveBeenCalledWith(existingSessionFile, expect.any(Object));
+
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(replacementNotifyMock).toHaveBeenCalledWith(
+			expect.stringContaining("(resumed session)"),
+			"info",
+		);
 	});
 
 	it("creates a fresh new session when user selects [+ Start a new session]", async () => {
@@ -279,7 +299,14 @@ describe("move extension", () => {
 			// Select first option: [+] Start a new session
 			return options[0];
 		});
-		const switchSessionMock = vi.fn().mockResolvedValue({ cancelled: false });
+		const replacementNotifyMock = vi.fn();
+		const switchSessionMock = vi.fn().mockImplementation(async (sessionFile, options) => {
+			if (options?.withSession) {
+				const replacementCtx = { ui: { notify: replacementNotifyMock } };
+				await options.withSession(replacementCtx);
+			}
+			return { cancelled: false };
+		});
 		const notifyMock = vi.fn();
 
 		const mockCtx = {
@@ -294,5 +321,11 @@ describe("move extension", () => {
 		expect(switchSessionMock).toHaveBeenCalledWith(expect.stringMatching(/\.jsonl$/), expect.any(Object));
 		// Ensure it didn't use the existing session path
 		expect(switchSessionMock).not.toHaveBeenCalledWith("/fake/path/session.jsonl", expect.any(Object));
+
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(replacementNotifyMock).toHaveBeenCalledWith(
+			expect.stringContaining("(new session)"),
+			"info",
+		);
 	});
 });

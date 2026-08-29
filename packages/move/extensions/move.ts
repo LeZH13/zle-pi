@@ -159,7 +159,13 @@ export default function moveExtension(pi: ExtensionAPI) {
 					} catch {}
 
 					const modeText = isNewSession ? "new session" : "resumed session";
-					replacementCtx.ui.notify(`Moved to ${displayTarget} (${modeText})`, "info");
+					// Defer notification so it executes after Pi's handleResumeSession
+					// displays "Resumed session", ensuring the correct new/resumed status is shown
+					setTimeout(() => {
+						try {
+							replacementCtx.ui.notify(`Moved to ${displayTarget} (${modeText})`, "info");
+						} catch {}
+					}, 0);
 				},
 			});
 
