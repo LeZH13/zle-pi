@@ -69,7 +69,7 @@ export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOpti
 
 			const working = new Set(enabled);
 
-			const confirmed = await ctx.ui.custom<boolean>((tui, theme, _keybindings, done) => {
+			const confirmed = await ctx.ui.custom<boolean>((tui, theme, keybindings, done) => {
 				const prepends = snippets.filter((s) => s.placement === "prepend");
 				const appends = snippets.filter((s) => s.placement === "append");
 				const items = [...prepends, ...appends];
@@ -78,6 +78,19 @@ export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOpti
 				let cursor = 0;
 				let listScroll = 0;
 				let previewScroll = 0;
+
+				const isUp = (data: string) =>
+					Boolean(keybindings?.matches ? keybindings.matches(data, "tui.select.up") : matchesKey(data, Key.up));
+				const isDown = (data: string) =>
+					Boolean(keybindings?.matches ? keybindings.matches(data, "tui.select.down") : matchesKey(data, Key.down));
+				const isPageUp = (data: string) =>
+					Boolean(keybindings?.matches ? keybindings.matches(data, "tui.select.pageUp") : matchesKey(data, Key.pageUp));
+				const isPageDown = (data: string) =>
+					Boolean(keybindings?.matches ? keybindings.matches(data, "tui.select.pageDown") : matchesKey(data, Key.pageDown));
+				const isConfirm = (data: string) =>
+					Boolean(keybindings?.matches ? keybindings.matches(data, "tui.select.confirm") : matchesKey(data, Key.enter));
+				const isCancel = (data: string) =>
+					Boolean(keybindings?.matches ? keybindings.matches(data, "tui.select.cancel") : matchesKey(data, Key.escape));
 
 				const itemRow = (snippet: Snippet, idx: number, width: number): string => {
 					const pointer = idx === cursor ? theme.fg("accent", "> ") : "  ";
@@ -198,12 +211,21 @@ export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOpti
 					},
 					invalidate() {},
 					handleInput(data: string) {
+						const maxView = Math.max(5, tui.terminal.rows - 10);
+						const pageSize = Math.max(1, maxView - 2);
+
 						if (mode === "list") {
-							if (matchesKey(data, Key.up)) {
+							if (isUp(data)) {
 								cursor = (cursor - 1 + items.length) % items.length;
 								tui.requestRender();
-							} else if (matchesKey(data, Key.down)) {
+							} else if (isDown(data)) {
 								cursor = (cursor + 1) % items.length;
+								tui.requestRender();
+							} else if (isPageUp(data)) {
+								cursor = Math.max(0, cursor - pageSize);
+								tui.requestRender();
+							} else if (isPageDown(data)) {
+								cursor = Math.min(items.length - 1, cursor + pageSize);
 								tui.requestRender();
 							} else if (matchesKey(data, Key.space)) {
 								const id = items[cursor].id;
@@ -214,19 +236,25 @@ export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOpti
 								mode = "preview";
 								previewScroll = 0;
 								tui.requestRender();
-							} else if (matchesKey(data, Key.enter)) {
+							} else if (isConfirm(data)) {
 								done(true);
-							} else if (matchesKey(data, Key.escape)) {
+							} else if (isCancel(data)) {
 								done(false);
 							}
 						} else {
-							if (matchesKey(data, Key.up)) {
-								previewScroll--;
+							if (isUp(data)) {
+								previewScroll = Math.max(0, previewScroll - 1);
 								tui.requestRender();
-							} else if (matchesKey(data, Key.down)) {
+							} else if (isDown(data)) {
 								previewScroll++;
 								tui.requestRender();
-							} else if (matchesKey(data, Key.tab) || matchesKey(data, Key.escape)) {
+							} else if (isPageUp(data)) {
+								previewScroll = Math.max(0, previewScroll - pageSize);
+								tui.requestRender();
+							} else if (isPageDown(data)) {
+								previewScroll += pageSize;
+								tui.requestRender();
+							} else if (matchesKey(data, Key.tab) || isCancel(data)) {
 								mode = "list";
 								tui.requestRender();
 							}
@@ -245,6 +273,13 @@ export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOpti
 			enabled = new Set();
 			snippets = getSnippets(ctx);
 			updateWidget(ctx);
+		});
+
+		pi.on("session_shutdown", (_event, ctx) => {
+			enabled = new Set();
+			if (ctx.hasUI && ctx.mode === "tui") {
+				ctx.ui.setWidget(WIDGET_ID, undefined);
+			}
 		});
 
 		pi.on("input", async (event, ctx) => {

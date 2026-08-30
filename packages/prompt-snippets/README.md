@@ -27,11 +27,12 @@ Then restart Pi or run `/reload` in your active session.
 ## Usage
 
 - Press **Alt+S** or run **/snippets** to open the interactive toggle menu.
-  - `↑` / `↓` to navigate items.
+  - `↑` / `↓` (or custom selection keybindings like `Ctrl+P` / `Ctrl+N`) to navigate items.
   - `Space` to toggle snippet active / inactive.
-  - `Tab` to preview the highlighted snippet (shows name, placement, order, source origin, filename, and prompt body). Press `Tab` or `Esc` to return to the list with cursor position preserved.
+  - `Tab` to preview the highlighted snippet (shows name, placement, order, source origin, filename, and prompt body). Press `Tab` or `Esc` (or `Ctrl+G` / `Ctrl+C`) to return to the list with cursor position preserved.
   - `Enter` to apply your selection.
   - `Esc` to cancel and discard changes.
+- **Keybinding Integration:** Respects custom `tui.select.*` actions from `~/.pi/agent/keybindings.json` (such as `tui.select.up`, `tui.select.down`, `tui.select.pageUp`, `tui.select.pageDown`, `tui.select.confirm`, and `tui.select.cancel`).
 - **Active Snippet Indicator:** Active snippets appear as a widget above the editor:
   - `↑ prepend: ...` (accent color) — inserted before your message.
   - `↓ append: ...` (warning color) — inserted after your message.
