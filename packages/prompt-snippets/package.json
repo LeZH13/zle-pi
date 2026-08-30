@@ -1,0 +1,40 @@
+{
+  "name": "@zle13/pi-prompt-snippets",
+  "version": "0.1.0",
+  "description": "Mix-and-match prompt snippets that prepend or append rules to messages in Pi",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "author": "zle13",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LeZH13/zle-pi.git",
+    "directory": "packages/prompt-snippets"
+  },
+  "files": [
+    "extensions",
+    "snippets",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/prompt-snippets.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit"
+  }
+}
