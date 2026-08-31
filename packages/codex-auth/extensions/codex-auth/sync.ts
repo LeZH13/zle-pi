@@ -1,7 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
-import { getCodexAuthJsonPath, getCodexHome, getPiAuthJsonPath, loadCodexAuth } from "./registry.js";
+import { getCodexAuthJsonPath, getCodexHome, getPiAuthJsonPath, loadCodexAuth, loadRegistry } from "./registry.js";
 import type { CodexAuthFile, PiAuthStore, PiOAuthCredential } from "./types.js";
+
+let lastInternalCodexWriteTime = 0;
+
+/** Check if ~/.codex/auth.json was written internally within the last second */
+export function isRecentInternalCodexWrite(): boolean {
+	return Date.now() - lastInternalCodexWriteTime < 1000;
+}
 
 /** Safely read Pi auth.json */
 export function loadPiAuth(): PiAuthStore {
@@ -28,6 +35,31 @@ export function savePiAuth(auth: PiAuthStore): void {
 }
 
 /**
+ * Safely extract expiry timestamp (in ms) from JWT access token payload.
+ * Returns null if token is not a valid JWT or does not contain a numeric `exp` claim.
+ */
+export function extractJwtExpiry(token: string): number | null {
+	try {
+		const parts = token.split(".");
+		if (parts.length !== 3) return null;
+		const payloadRaw = parts[1];
+		if (!payloadRaw) return null;
+		const decoded = JSON.parse(Buffer.from(payloadRaw, "base64url").toString("utf8"));
+		if (
+			typeof decoded === "object" &&
+			decoded !== null &&
+			typeof decoded.exp === "number" &&
+			Number.isFinite(decoded.exp)
+		) {
+			return decoded.exp * 1000;
+		}
+	} catch {
+		// Ignore decode errors
+	}
+	return null;
+}
+
+/**
  * Synchronize credentials from ~/.codex/auth.json into ~/.pi/agent/auth.json
  * Returns true if Pi's auth was updated or changed.
  */
@@ -42,26 +74,32 @@ export function syncCodexToPi(): { changed: boolean; accountId?: string } {
 		return { changed: false };
 	}
 
+	// Extract the true expiration from the JWT (typically 8-10 days for OpenAI ChatGPT OAuth)
+	// Fallback to 8 days if non-standard or missing exp
+	const realExpiry = extractJwtExpiry(access_token) ?? Date.now() + 8 * 86400 * 1000;
+
 	const piAuth = loadPiAuth();
 	const existing = piAuth["openai-codex"] as PiOAuthCredential | undefined;
 
-	// Check if already in sync
+	// Check if already completely up to date (matching tokens and valid expiry)
 	if (
 		existing &&
 		existing.type === "oauth" &&
 		existing.access === access_token &&
 		existing.refresh === refresh_token &&
-		existing.accountId === account_id
+		existing.accountId === account_id &&
+		typeof existing.expires === "number" &&
+		Math.abs(existing.expires - realExpiry) < 60_000
 	) {
 		return { changed: false, accountId: account_id };
 	}
 
-	// Update Pi auth.json
+	// Update Pi auth.json with the real expiration timestamp
 	piAuth["openai-codex"] = {
 		type: "oauth",
 		access: access_token,
 		refresh: refresh_token,
-		expires: Date.now() + 3600 * 1000,
+		expires: realExpiry,
 		accountId: account_id,
 	};
 
@@ -105,6 +143,7 @@ export function syncPiToCodex(): { changed: boolean } {
 	};
 
 	try {
+		lastInternalCodexWriteTime = Date.now();
 		const targetPath = getCodexAuthJsonPath();
 		const tmp = `${targetPath}.tmp.${Date.now()}`;
 		fs.writeFileSync(tmp, JSON.stringify(updatedCodexAuth, null, 2), { mode: 0o600 });
@@ -113,12 +152,22 @@ export function syncPiToCodex(): { changed: boolean } {
 		// Also update the account snapshot file under ~/.codex/accounts/
 		const accountsDir = path.join(getCodexHome(), "accounts");
 		if (fs.existsSync(accountsDir)) {
-			const candidateFiles = fs.readdirSync(accountsDir).filter((f) => f.endsWith(".auth.json"));
+			const registry = loadRegistry();
+			const matchedAccount = registry?.accounts.find(
+				(acc) => acc.chatgpt_account_id === piCodex.accountId || acc.account_key.includes(piCodex.accountId),
+			);
+
+			const candidateFiles = fs.readdirSync(accountsDir).filter((f) => f.endsWith(".auth.json") && !f.includes(".bak"));
 			for (const file of candidateFiles) {
 				const fullPath = path.join(accountsDir, file);
 				try {
 					const snap = JSON.parse(fs.readFileSync(fullPath, "utf8")) as CodexAuthFile;
-					if (snap.tokens?.account_id === piCodex.accountId) {
+					const snapAccountId = snap.tokens?.account_id;
+					const isTarget =
+						snapAccountId === piCodex.accountId ||
+						(matchedAccount && file === `${Buffer.from(matchedAccount.account_key).toString("base64url")}.auth.json`);
+
+					if (isTarget && snap.tokens) {
 						snap.tokens.access_token = piCodex.access;
 						snap.tokens.refresh_token = piCodex.refresh;
 						snap.last_refresh = updatedCodexAuth.last_refresh;
@@ -150,6 +199,10 @@ export function setupCodexAuthWatcher(onChanged: () => void): () => void {
 	const trigger = () => {
 		if (debounceTimer) clearTimeout(debounceTimer);
 		debounceTimer = setTimeout(() => {
+			// Suppress watcher triggers caused by our own write-back
+			if (isRecentInternalCodexWrite()) {
+				return;
+			}
 			onChanged();
 		}, 250);
 	};
