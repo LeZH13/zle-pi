@@ -1,4 +1,5 @@
-import type { ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { loadCodexAuth, loadRegistry, maskEmail, maskId } from "./registry.js";
 import type { CodexAccount, CodexAuthConfig, CodexRegistry } from "./types.js";
 
@@ -58,6 +59,66 @@ export function getAccountLabel(acc: CodexAccount): string {
 	return `${name}${plan}`;
 }
 
+/** Build a single responsive widget status line that fits within available width */
+export function buildWidgetLine(
+	theme: Theme | { fg: (color: any, text: string) => string },
+	active: CodexAccount,
+	width: number,
+): string {
+	if (width <= 0) return "";
+
+	const rawName = active.alias || maskEmail(active.email) || maskId(active.chatgpt_account_id);
+	const rawPlan = active.plan ? ` (${active.plan.toLowerCase()})` : "";
+	const u5h = active.last_usage?.primary?.used_percent ?? 0;
+	const r5h = formatResetTime(active.last_usage?.primary?.resets_at);
+	const uWeek = active.last_usage?.secondary?.used_percent ?? 0;
+	const rWeek = formatResetTime(active.last_usage?.secondary?.resets_at);
+
+	const tag = theme.fg("dim", "codex: ");
+	const sep = theme.fg("dim", " • ");
+
+	const nameWithPlan = theme.fg("muted", `${rawName}${rawPlan}`);
+	const nameOnly = theme.fg("muted", rawName);
+
+	const q5hFull = theme.fg("dim", `5h ${formatProgressBar(u5h, 5)}${r5h ? ` (${r5h})` : ""}`);
+	const q5hBar = theme.fg("dim", `5h ${formatProgressBar(u5h, 5)}`);
+	const q5hPct = theme.fg("dim", `5h ${u5h}%`);
+
+	const qWkFull = theme.fg("dim", `wk ${formatProgressBar(uWeek, 5)}${rWeek ? ` (${rWeek})` : ""}`);
+	const qWkBar = theme.fg("dim", `wk ${formatProgressBar(uWeek, 5)}`);
+	const qWkPct = theme.fg("dim", `wk ${uWeek}%`);
+
+	// Candidates ordered from richest detail to most compact layout
+	const candidates = [
+		// 1. Full: codex: work (plus) • 5h [░░░░░] 5% (now) • wk [░░░░░] 1% (in 6d)
+		`${tag}${nameWithPlan}${sep}${q5hFull}${sep}${qWkFull}`,
+		// 2. Omit weekly reset countdown
+		`${tag}${nameWithPlan}${sep}${q5hFull}${sep}${qWkBar}`,
+		// 3. Omit reset countdowns: codex: work (plus) • 5h [░░░░░] 5% • wk [░░░░░] 1%
+		`${tag}${nameWithPlan}${sep}${q5hBar}${sep}${qWkBar}`,
+		// 4. Omit plan: codex: work • 5h [░░░░░] 5% • wk [░░░░░] 1%
+		`${tag}${nameOnly}${sep}${q5hBar}${sep}${qWkBar}`,
+		// 5. Compact percentages with plan: codex: work (plus) • 5h 5% • wk 1%
+		`${tag}${nameWithPlan}${sep}${q5hPct}${sep}${qWkPct}`,
+		// 6. Compact percentages: codex: work • 5h 5% • wk 1%
+		`${tag}${nameOnly}${sep}${q5hPct}${sep}${qWkPct}`,
+		// 7. 5h quota only: codex: work • 5h 5%
+		`${tag}${nameOnly}${sep}${q5hPct}`,
+		// 8. Name only: codex: work
+		`${tag}${nameOnly}`,
+	];
+
+	for (const candidate of candidates) {
+		if (visibleWidth(candidate) <= width) {
+			return candidate;
+		}
+	}
+
+	// Always guarantee the returned string never exceeds width
+	const shortest = candidates[candidates.length - 1] ?? "";
+	return truncateToWidth(shortest, width, "…");
+}
+
 /** Update Pi footer status badge & 2nd line widget */
 export function refreshUI(ctx: ExtensionContext, config: CodexAuthConfig): void {
 	if (!ctx.hasUI) return;
@@ -78,31 +139,18 @@ export function refreshUI(ctx: ExtensionContext, config: CodexAuthConfig): void 
 		ctx.ui.setStatus("codex-auth", undefined);
 	}
 
-	// 2. Dedicated 2nd Line Widget below editor (With Faint Hairline Divider)
+	// 2. Dedicated 2nd Line Widget below editor (With Faint Hairline Divider & Width Clamping)
 	if (config.widgetEnabled && active) {
-		const label = active.alias || maskEmail(active.email);
-		const plan = active.plan ? ` (${active.plan.toLowerCase()})` : "";
-		const u5h = active.last_usage?.primary?.used_percent ?? 0;
-		const r5h = formatResetTime(active.last_usage?.primary?.resets_at);
-		const uWeek = active.last_usage?.secondary?.used_percent ?? 0;
-		const rWeek = formatResetTime(active.last_usage?.secondary?.resets_at);
-
 		ctx.ui.setWidget(
 			"codex-auth",
 			(_tui, theme) => {
-				const tag = theme.fg("dim", "codex: ");
-				const name = theme.fg("muted", `${label}${plan}`);
-				const sep = theme.fg("dim", " • ");
-				const q5h = theme.fg("dim", `5h ${formatProgressBar(u5h, 5)}${r5h ? ` (${r5h})` : ""}`);
-				const qWk = theme.fg("dim", `wk ${formatProgressBar(uWeek, 5)}${rWeek ? ` (${rWeek})` : ""}`);
-
-				const widgetLine = `${tag}${name}${sep}${q5h}${sep}${qWk}`;
-
 				return {
 					render: (width) => {
-						const dividerLen = Math.max(16, Math.min(typeof width === "number" ? width : 40, 50));
-						const faintDivider = theme.fg("borderMuted", "─".repeat(dividerLen));
-						return [widgetLine, faintDivider];
+						if (typeof width !== "number" || width <= 0) return [];
+						const widgetLine = buildWidgetLine(theme, active, width);
+						const dividerLen = Math.max(0, Math.min(width, 50));
+						const faintDivider = dividerLen > 0 ? theme.fg("borderMuted", "─".repeat(dividerLen)) : "";
+						return faintDivider ? [widgetLine, faintDivider] : [widgetLine];
 					},
 					invalidate: () => {},
 				};

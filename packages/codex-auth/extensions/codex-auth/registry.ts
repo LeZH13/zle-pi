@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { CodexAccount, CodexAuthFile, CodexRegistry } from "./types.js";
+import type { CodexAccount, CodexAuthConfig, CodexAuthFile, CodexRegistry } from "./types.js";
 
 /** Resolve Codex home path (~/.codex) */
 export function getCodexHome(): string {
@@ -29,6 +29,46 @@ export function getCodexAuthJsonPath(): string {
 /** Path to ~/.pi/agent/auth.json */
 export function getPiAuthJsonPath(): string {
 	return path.join(getPiAgentDir(), "auth.json");
+}
+
+/** Path to ~/.pi/agent/codex-auth.json (persistent extension settings) */
+export function getCodexAuthConfigPath(): string {
+	return path.join(getPiAgentDir(), "codex-auth.json");
+}
+
+const DEFAULT_CONFIG: CodexAuthConfig = {
+	widgetEnabled: true,
+	footerEnabled: true,
+};
+
+/** Load persisted extension UI configuration */
+export function loadConfig(): CodexAuthConfig {
+	const configPath = getCodexAuthConfigPath();
+	if (!fs.existsSync(configPath)) {
+		return { ...DEFAULT_CONFIG };
+	}
+	try {
+		const raw = fs.readFileSync(configPath, "utf8");
+		const parsed = JSON.parse(raw);
+		return {
+			widgetEnabled: typeof parsed.widgetEnabled === "boolean" ? parsed.widgetEnabled : DEFAULT_CONFIG.widgetEnabled,
+			footerEnabled: typeof parsed.footerEnabled === "boolean" ? parsed.footerEnabled : DEFAULT_CONFIG.footerEnabled,
+		};
+	} catch {
+		return { ...DEFAULT_CONFIG };
+	}
+}
+
+/** Persist extension UI configuration */
+export function saveConfig(config: CodexAuthConfig): void {
+	const configPath = getCodexAuthConfigPath();
+	const dir = path.dirname(configPath);
+	if (!fs.existsSync(dir)) {
+		fs.mkdirSync(dir, { recursive: true });
+	}
+	const tmpPath = `${configPath}.tmp.${Date.now()}`;
+	fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+	fs.renameSync(tmpPath, configPath);
 }
 
 /** Mask email address for safe display (e.g. "user***@domain.com") */

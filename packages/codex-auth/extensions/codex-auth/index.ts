@@ -12,17 +12,14 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
-import { loadRegistry, maskEmail, switchActiveAccount } from "./registry.js";
+import { loadConfig, loadRegistry, maskEmail, saveConfig, switchActiveAccount } from "./registry.js";
 import { setupCodexAuthWatcher, syncCodexToPi, syncPiToCodex } from "./sync.js";
 import type { CodexAuthConfig } from "./types.js";
 import { formatProgressBar, formatResetTime, getActiveAccount, promptAccountPicker, refreshUI } from "./ui.js";
 
 export default function codexAuthExtension(pi: ExtensionAPI) {
-	// Extension display configuration (both enabled by default, easily toggleable)
-	const config: CodexAuthConfig = {
-		widgetEnabled: true,
-		footerEnabled: true,
-	};
+	// Extension display configuration (persisted across sessions in ~/.pi/agent/codex-auth.json)
+	const config: CodexAuthConfig = loadConfig();
 
 	let disposeWatcher: (() => void) | null = null;
 	let lastContext: ExtensionContext | null = null;
@@ -131,6 +128,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				else if (val === "off") config.widgetEnabled = false;
 				else config.widgetEnabled = !config.widgetEnabled;
 
+				saveConfig(config);
 				refreshUI(ctx, config);
 				ctx.ui.notify(`Codex 2nd-line widget: ${config.widgetEnabled ? "ENABLED" : "DISABLED"}`, "info");
 				return;
@@ -143,6 +141,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				else if (val === "off") config.footerEnabled = false;
 				else config.footerEnabled = !config.footerEnabled;
 
+				saveConfig(config);
 				refreshUI(ctx, config);
 				ctx.ui.notify(`Codex footer badge: ${config.footerEnabled ? "ENABLED" : "DISABLED"}`, "info");
 				return;
@@ -226,6 +225,9 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 	// Session Start Lifecycle: Sync credentials, setup live watcher, update UI
 	pi.on("session_start", async (_event, ctx) => {
 		lastContext = ctx;
+
+		// 0. Refresh in-memory config from disk in case updated elsewhere
+		Object.assign(config, loadConfig());
 
 		// 1. Sync from Codex auth into Pi
 		syncCodexToPi();

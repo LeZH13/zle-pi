@@ -4,10 +4,11 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import codexAuthExtension from "../extensions/codex-auth/index.js";
-import { findAccount, maskEmail, maskId } from "../extensions/codex-auth/registry.js";
+import { findAccount, getCodexAuthConfigPath, loadConfig, maskEmail, maskId, saveConfig } from "../extensions/codex-auth/registry.js";
 import { extractJwtExpiry, syncCodexToPi, syncPiToCodex } from "../extensions/codex-auth/sync.js";
 import type { CodexAuthFile, CodexRegistry, PiAuthStore } from "../extensions/codex-auth/types.js";
-import { formatProgressBar, formatResetTime, getActiveAccount } from "../extensions/codex-auth/ui.js";
+import { buildWidgetLine, formatProgressBar, formatResetTime, getActiveAccount, refreshUI } from "../extensions/codex-auth/ui.js";
+import { visibleWidth } from "@earendil-works/pi-tui";
 
 describe("codex-auth extension", () => {
 	let registeredCommands: Map<string, any>;
@@ -133,6 +134,81 @@ describe("codex-auth extension", () => {
 		});
 	});
 
+	describe("responsive widget line rendering", () => {
+		const mockTheme = {
+			fg: (_color: string, text: string) => text,
+		};
+
+		const mockAccount = {
+			account_key: "acc-1",
+			alias: "work",
+			email: "lezh123456789@gmail.com",
+			chatgpt_account_id: "id-work-123",
+			plan: "plus",
+			last_usage: {
+				primary: { used_percent: 5, resets_at: Math.floor(Date.now() / 1000), window_minutes: 300 },
+				secondary: { used_percent: 1, resets_at: Math.floor(Date.now() / 1000) + 6 * 86400, window_minutes: 10080 },
+			},
+		};
+
+		it("formats full widget line when sufficient width is available", () => {
+			const line = buildWidgetLine(mockTheme, mockAccount, 100);
+			expect(visibleWidth(line)).toBeLessThanOrEqual(100);
+			expect(line).toContain("codex: work (plus)");
+			expect(line).toContain("5h [");
+			expect(line).toContain("wk [");
+		});
+
+		it("never exceeds terminal width for any width from 0 to 120", () => {
+			for (let w = 0; w <= 120; w++) {
+				const line = buildWidgetLine(mockTheme, mockAccount, w);
+				expect(visibleWidth(line)).toBeLessThanOrEqual(w);
+			}
+		});
+
+		it("handles narrow terminal width (width=65 crash scenario) gracefully", () => {
+			const line = buildWidgetLine(mockTheme, mockAccount, 65);
+			expect(visibleWidth(line)).toBeLessThanOrEqual(65);
+			expect(line).toContain("codex:");
+		});
+
+		it("handles very narrow widths (width < 20) without crashing", () => {
+			const line15 = buildWidgetLine(mockTheme, mockAccount, 15);
+			expect(visibleWidth(line15)).toBeLessThanOrEqual(15);
+
+			const line5 = buildWidgetLine(mockTheme, mockAccount, 5);
+			expect(visibleWidth(line5)).toBeLessThanOrEqual(5);
+
+			const line0 = buildWidgetLine(mockTheme, mockAccount, 0);
+			expect(line0).toBe("");
+		});
+
+		it("ensures widget render() lines never exceed width including divider", () => {
+			let capturedFactory: any;
+			const mockCtx = {
+				hasUI: true,
+				ui: {
+					setStatus: vi.fn(),
+					setWidget: vi.fn((_id, factory) => {
+						capturedFactory = factory;
+					}),
+				},
+			} as any;
+
+			refreshUI(mockCtx, { widgetEnabled: true, footerEnabled: true });
+			expect(capturedFactory).toBeDefined();
+
+			const widgetComponent = capturedFactory({}, mockTheme);
+			for (const width of [65, 50, 30, 15, 5, 0, -1]) {
+				const lines = widgetComponent.render(width);
+				expect(Array.isArray(lines)).toBe(true);
+				for (const line of lines) {
+					expect(visibleWidth(line)).toBeLessThanOrEqual(Math.max(0, width));
+				}
+			}
+		});
+	});
+
 	describe("autocomplete suggestions", () => {
 		it("provides subcommand and account suggestions", () => {
 			const cmd = registeredCommands.get("codex-auth");
@@ -158,8 +234,39 @@ describe("codex-auth extension", () => {
 		});
 	});
 
-	describe("command execution", () => {
-		it("handles widget and footer toggles", async () => {
+	describe("command execution & configuration persistence", () => {
+		const testDir = join(tmpdir(), `codex-auth-config-test-${Date.now()}`);
+		const piHome = join(testDir, ".pi", "agent");
+
+		beforeEach(() => {
+			process.env.PI_CODING_AGENT_DIR = piHome;
+			mkdirSync(piHome, { recursive: true });
+		});
+
+		afterEach(() => {
+			delete process.env.PI_CODING_AGENT_DIR;
+			rmSync(testDir, { recursive: true, force: true });
+		});
+
+		it("loads default config when file does not exist", () => {
+			const config = loadConfig();
+			expect(config.widgetEnabled).toBe(true);
+			expect(config.footerEnabled).toBe(true);
+		});
+
+		it("saves and loads configuration across sessions", () => {
+			saveConfig({ widgetEnabled: false, footerEnabled: true });
+			const loaded = loadConfig();
+			expect(loaded.widgetEnabled).toBe(false);
+			expect(loaded.footerEnabled).toBe(true);
+
+			saveConfig({ widgetEnabled: false, footerEnabled: false });
+			const reloaded = loadConfig();
+			expect(reloaded.widgetEnabled).toBe(false);
+			expect(reloaded.footerEnabled).toBe(false);
+		});
+
+		it("handles widget and footer toggles with persistence across sessions", async () => {
 			const cmd = registeredCommands.get("codex-auth");
 			const mockCtx = {
 				hasUI: true,
@@ -175,12 +282,41 @@ describe("codex-auth extension", () => {
 				expect.stringContaining("Codex 2nd-line widget: DISABLED"),
 				"info",
 			);
+			expect(loadConfig().widgetEnabled).toBe(false);
 
 			await cmd.handler("footer off", mockCtx);
 			expect(mockCtx.ui.notify).toHaveBeenCalledWith(
 				expect.stringContaining("Codex footer badge: DISABLED"),
 				"info",
 			);
+			expect(loadConfig().footerEnabled).toBe(false);
+
+			// Simulate starting a new session with persisted config
+			let sessionStartHandler: any;
+			const freshMockPi = {
+				registerCommand: vi.fn(),
+				on: vi.fn((event: string, handler: any) => {
+					if (event === "session_start") {
+						sessionStartHandler = handler;
+					}
+				}),
+			} as any;
+			codexAuthExtension(freshMockPi);
+
+			expect(sessionStartHandler).toBeDefined();
+
+			const newSessionCtx = {
+				hasUI: true,
+				ui: {
+					notify: vi.fn(),
+					setStatus: vi.fn(),
+					setWidget: vi.fn(),
+				},
+			} as any;
+
+			await sessionStartHandler({}, newSessionCtx);
+			expect(newSessionCtx.ui.setWidget).toHaveBeenCalledWith("codex-auth", undefined);
+			expect(newSessionCtx.ui.setStatus).toHaveBeenCalledWith("codex-auth", undefined);
 		});
 	});
 
@@ -233,7 +369,7 @@ describe("codex-auth extension", () => {
 			expect(res.changed).toBe(true);
 
 			const piAuth: PiAuthStore = JSON.parse(readFileSync(join(piHome, "auth.json"), "utf8"));
-			const cred = piAuth["openai-codex"];
+			const cred = piAuth["openai-codex"] as { type: "oauth"; access: string; refresh: string; accountId: string; expires: number } | undefined;
 			expect(cred).toBeDefined();
 			expect(cred?.type).toBe("oauth");
 			if (cred?.type === "oauth") {

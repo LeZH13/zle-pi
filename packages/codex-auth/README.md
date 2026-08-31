@@ -55,6 +55,7 @@ pi install /path/to/zle-pi/packages/codex-auth
 * **Live File Watcher:** Automatically detects external `codex-auth switch` calls from other terminals and updates Pi immediately.
 * **Bi-directional Refresh Write-back:** When Pi refreshes an expired OAuth token, the new tokens are written back to `~/.codex/auth.json` and its snapshots so external CLI tools never break.
 * **Strict Secret Redaction:** All tokens, refresh tokens, and private account IDs are completely protected and masked in logs/UI.
+* **Persistent Display Preferences:** Toggle settings (`/codex-auth widget on|off` and `/codex-auth footer on|off`) are automatically saved to `~/.pi/agent/codex-auth.json` and persist across sessions.
 
 ---
 
