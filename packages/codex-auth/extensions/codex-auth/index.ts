@@ -15,7 +15,14 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { loadConfig, loadRegistry, maskEmail, saveConfig, switchActiveAccount } from "./registry.js";
 import { setupCodexAuthWatcher, syncCodexToPi, syncPiToCodex } from "./sync.js";
 import type { CodexAuthConfig } from "./types.js";
-import { formatProgressBar, formatResetTime, getActiveAccount, promptAccountPicker, refreshUI } from "./ui.js";
+import {
+	calculateRemainingPercent,
+	formatProgressBar,
+	formatResetTime,
+	getActiveAccount,
+	promptAccountPicker,
+	refreshUI,
+} from "./ui.js";
 
 export default function codexAuthExtension(pi: ExtensionAPI) {
 	// Extension display configuration (persisted across sessions in ~/.pi/agent/codex-auth.json)
@@ -180,9 +187,9 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 					const alias = acc.alias ? `[${acc.alias}] ` : "";
 					const email = maskEmail(acc.email);
 					const plan = acc.plan ? `(${acc.plan.toUpperCase()})` : "";
-					const u5h = acc.last_usage?.primary?.used_percent ?? 0;
+					const u5h = calculateRemainingPercent(acc.last_usage?.primary?.used_percent);
 					const r5h = formatResetTime(acc.last_usage?.primary?.resets_at);
-					const uWk = acc.last_usage?.secondary?.used_percent ?? 0;
+					const uWk = calculateRemainingPercent(acc.last_usage?.secondary?.used_percent);
 					const rWk = formatResetTime(acc.last_usage?.secondary?.resets_at);
 
 					lines.push(

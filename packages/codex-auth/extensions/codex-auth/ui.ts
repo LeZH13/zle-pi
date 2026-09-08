@@ -3,7 +3,18 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { loadCodexAuth, loadRegistry, maskEmail, maskId } from "./registry.js";
 import type { CodexAccount, CodexAuthConfig, CodexRegistry } from "./types.js";
 
-/** Generate a compact dimmed visual progress bar (e.g. [░░░░] 5%) */
+/**
+ * Calculate remaining quota percentage from used_percent (100% when unused, 0% when depleted).
+ * Consistent with codex-auth CLI convention.
+ */
+export function calculateRemainingPercent(usedPercent?: number | null): number {
+	if (typeof usedPercent !== "number" || Number.isNaN(usedPercent)) {
+		return 100;
+	}
+	return Math.max(0, Math.min(100, Math.round(100 - usedPercent)));
+}
+
+/** Generate a compact dimmed visual progress bar (e.g. [████░] 80%) */
 export function formatProgressBar(percent: number, width = 6): string {
 	const clamped = Math.max(0, Math.min(100, percent));
 	const filledChars = Math.round((clamped / 100) * width);
@@ -69,9 +80,9 @@ export function buildWidgetLine(
 
 	const rawName = active.alias || maskEmail(active.email) || maskId(active.chatgpt_account_id);
 	const rawPlan = active.plan ? ` (${active.plan.toLowerCase()})` : "";
-	const u5h = active.last_usage?.primary?.used_percent ?? 0;
+	const u5h = calculateRemainingPercent(active.last_usage?.primary?.used_percent);
 	const r5h = formatResetTime(active.last_usage?.primary?.resets_at);
-	const uWeek = active.last_usage?.secondary?.used_percent ?? 0;
+	const uWeek = calculateRemainingPercent(active.last_usage?.secondary?.used_percent);
 	const rWeek = formatResetTime(active.last_usage?.secondary?.resets_at);
 
 	const tag = theme.fg("dim", "codex: ");
@@ -90,19 +101,19 @@ export function buildWidgetLine(
 
 	// Candidates ordered from richest detail to most compact layout
 	const candidates = [
-		// 1. Full: codex: work (plus) • 5h [░░░░░] 5% (now) • wk [░░░░░] 1% (in 6d)
+		// 1. Full: codex: work (plus) • 5h [█████] 95% (now) • wk [█████] 99% (in 6d)
 		`${tag}${nameWithPlan}${sep}${q5hFull}${sep}${qWkFull}`,
 		// 2. Omit weekly reset countdown
 		`${tag}${nameWithPlan}${sep}${q5hFull}${sep}${qWkBar}`,
-		// 3. Omit reset countdowns: codex: work (plus) • 5h [░░░░░] 5% • wk [░░░░░] 1%
+		// 3. Omit reset countdowns: codex: work (plus) • 5h [█████] 95% • wk [█████] 99%
 		`${tag}${nameWithPlan}${sep}${q5hBar}${sep}${qWkBar}`,
-		// 4. Omit plan: codex: work • 5h [░░░░░] 5% • wk [░░░░░] 1%
+		// 4. Omit plan: codex: work • 5h [█████] 95% • wk [█████] 99%
 		`${tag}${nameOnly}${sep}${q5hBar}${sep}${qWkBar}`,
-		// 5. Compact percentages with plan: codex: work (plus) • 5h 5% • wk 1%
+		// 5. Compact percentages with plan: codex: work (plus) • 5h 95% • wk 99%
 		`${tag}${nameWithPlan}${sep}${q5hPct}${sep}${qWkPct}`,
-		// 6. Compact percentages: codex: work • 5h 5% • wk 1%
+		// 6. Compact percentages: codex: work • 5h 95% • wk 99%
 		`${tag}${nameOnly}${sep}${q5hPct}${sep}${qWkPct}`,
-		// 7. 5h quota only: codex: work • 5h 5%
+		// 7. 5h quota only: codex: work • 5h 95%
 		`${tag}${nameOnly}${sep}${q5hPct}`,
 		// 8. Name only: codex: work
 		`${tag}${nameOnly}`,
@@ -181,10 +192,10 @@ export async function promptAccountPicker(
 		const emailPart = maskEmail(acc.email);
 		const planPart = acc.plan ? ` (${acc.plan.toLowerCase()})` : "";
 
-		const u5h = acc.last_usage?.primary?.used_percent;
-		const u5hStr = u5h !== undefined ? ` • 5h: ${u5h}%` : "";
-		const uWeek = acc.last_usage?.secondary?.used_percent;
-		const uWeekStr = uWeek !== undefined ? ` • wk: ${uWeek}%` : "";
+		const rawU5h = acc.last_usage?.primary?.used_percent;
+		const u5hStr = typeof rawU5h === "number" ? ` • 5h: ${calculateRemainingPercent(rawU5h)}%` : "";
+		const rawUWeek = acc.last_usage?.secondary?.used_percent;
+		const uWeekStr = typeof rawUWeek === "number" ? ` • wk: ${calculateRemainingPercent(rawUWeek)}%` : "";
 
 		return {
 			id: acc.account_key,

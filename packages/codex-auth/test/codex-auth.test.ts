@@ -7,7 +7,14 @@ import codexAuthExtension from "../extensions/codex-auth/index.js";
 import { findAccount, getCodexAuthConfigPath, loadConfig, maskEmail, maskId, saveConfig } from "../extensions/codex-auth/registry.js";
 import { extractJwtExpiry, syncCodexToPi, syncPiToCodex } from "../extensions/codex-auth/sync.js";
 import type { CodexAuthFile, CodexRegistry, PiAuthStore } from "../extensions/codex-auth/types.js";
-import { buildWidgetLine, formatProgressBar, formatResetTime, getActiveAccount, refreshUI } from "../extensions/codex-auth/ui.js";
+import {
+	buildWidgetLine,
+	calculateRemainingPercent,
+	formatProgressBar,
+	formatResetTime,
+	getActiveAccount,
+	refreshUI,
+} from "../extensions/codex-auth/ui.js";
 import { visibleWidth } from "@earendil-works/pi-tui";
 
 describe("codex-auth extension", () => {
@@ -61,6 +68,17 @@ describe("codex-auth extension", () => {
 			expect(formatProgressBar(0, 5)).toBe("[░░░░░] 0%");
 			expect(formatProgressBar(50, 6)).toBe("[███░░░] 50%");
 			expect(formatProgressBar(100, 5)).toBe("[█████] 100%");
+		});
+
+		it("calculates remaining percentage consistently with codex-auth (100% when unused, 0% when depleted)", () => {
+			expect(calculateRemainingPercent(0)).toBe(100);
+			expect(calculateRemainingPercent(100)).toBe(0);
+			expect(calculateRemainingPercent(16)).toBe(84);
+			expect(calculateRemainingPercent(5)).toBe(95);
+			expect(calculateRemainingPercent(undefined)).toBe(100);
+			expect(calculateRemainingPercent(null)).toBe(100);
+			expect(calculateRemainingPercent(-10)).toBe(100);
+			expect(calculateRemainingPercent(150)).toBe(0);
 		});
 
 		it("formats reset time countdowns", () => {
@@ -157,6 +175,19 @@ describe("codex-auth extension", () => {
 			expect(line).toContain("codex: work (plus)");
 			expect(line).toContain("5h [");
 			expect(line).toContain("wk [");
+		});
+
+		it("shows 100% when unused (used_percent=0) and 0% when depleted (used_percent=100)", () => {
+			const account = {
+				...mockAccount,
+				last_usage: {
+					primary: { used_percent: 0, resets_at: Math.floor(Date.now() / 1000), window_minutes: 300 },
+					secondary: { used_percent: 100, resets_at: Math.floor(Date.now() / 1000) + 6 * 86400, window_minutes: 10080 },
+				},
+			};
+			const line = buildWidgetLine(mockTheme, account, 100);
+			expect(line).toContain("5h [█████] 100%");
+			expect(line).toContain("wk [░░░░░] 0%");
 		});
 
 		it("never exceeds terminal width for any width from 0 to 120", () => {
@@ -419,6 +450,41 @@ describe("codex-auth extension", () => {
 			const updatedSnap: CodexAuthFile = JSON.parse(readFileSync(snapshotPath, "utf8"));
 			expect(updatedSnap.tokens?.access_token).toBe("new-access-from-pi");
 			expect(updatedSnap.tokens?.refresh_token).toBe("new-refresh-from-pi");
+		});
+
+		it("formats /codex-auth status lines with remaining percentages (100% when unused, 0% when depleted)", async () => {
+			const mockRegistry: CodexRegistry = {
+				schema_version: 3,
+				active_account_key: "acc-1",
+				accounts: [
+					{
+						account_key: "acc-1",
+						alias: "work",
+						email: "work@example.com",
+						chatgpt_account_id: "id-work-123",
+						plan: "plus",
+						last_usage: {
+							primary: { used_percent: 0, window_minutes: 300, resets_at: Math.floor(Date.now() / 1000) + 3600 },
+							secondary: { used_percent: 100, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 86400 },
+						},
+					},
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			const cmd = registeredCommands.get("codex-auth");
+			const mockCtx = {
+				hasUI: true,
+				ui: {
+					notify: vi.fn(),
+				},
+			} as unknown as ExtensionCommandContext;
+
+			await cmd.handler("status", mockCtx);
+			expect(mockCtx.ui.notify).toHaveBeenCalled();
+			const output = (mockCtx.ui.notify as any).mock.calls[0][0];
+			expect(output).toContain("5h:     [██████████] 100%");
+			expect(output).toContain("Weekly: [░░░░░░░░░░] 0%");
 		});
 	});
 });
