@@ -4,8 +4,12 @@ import { join } from "node:path";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	buildEmptyDirectorySessionOptions,
 	buildRecentDirectoryCompletions,
 	buildSessionSelectionOptions,
+	buildUnifiedMoveOptions,
+	buildWorktreeCompletions,
+	createForkedSessionFile,
 	createNewSessionFile,
 	expandHomePath,
 	extractRecentDirectories,
@@ -14,8 +18,10 @@ import {
 	formatSessionSummary,
 	getDirectoryCompletions,
 	matchRecentDirectory,
+	NERD_ICONS,
 	resolveTargetDir,
 } from "../extensions/utils.js";
+import type { GitWorktree } from "../extensions/git.js";
 
 describe("utils", () => {
 	const mockHome = "/Users/testuser";
@@ -194,6 +200,32 @@ describe("utils", () => {
 			expect(options[2].label).toContain("[ ]");
 			expect(options[2].label).toContain("Old task");
 			expect(options[2].label).toContain("4d ago");
+		});
+
+		it("includes fork option when currentSession has a valid path", () => {
+			const sessions: any[] = [
+				{
+					id: "12345678-abcd",
+					path: "/sessions/target-session.jsonl",
+					name: "Target Session",
+					firstMessage: "Work on target",
+					modified: new Date("2026-03-01T11:00:00Z"),
+					messageCount: 5,
+				},
+			];
+
+			const options = buildSessionSelectionOptions(
+				sessions,
+				new Date("2026-03-01T12:00:00Z"),
+				{ path: "/sessions/current.jsonl", messageCount: 3 },
+			);
+
+			expect(options).toHaveLength(3);
+			expect(options[0].isNew).toBe(true);
+			expect(options[1].isFork).toBe(true);
+			expect(options[1].label).toBe(`${NERD_ICONS.git} Inherit current session (fork)`);
+			expect(options[1].sourceSessionPath).toBe("/sessions/current.jsonl");
+			expect(options[2].sessionPath).toBe("/sessions/target-session.jsonl");
 		});
 	});
 
@@ -440,6 +472,131 @@ describe("utils", () => {
 			const matchRegex = getDirectoryCompletions("front.*app", tempDir, mockHome, recentSessions, now);
 			expect(matchRegex).not.toBeNull();
 			expect(matchRegex![0].label).toBe(`${frontendDir}/`);
+		});
+
+		it("includes git worktrees at the top of completions", () => {
+			const wtDir = join(tempDir, "worktrees", "feature-auth");
+			mkdirSync(wtDir, { recursive: true });
+
+			const mockWorktrees: GitWorktree[] = [
+				{
+					path: tempDir,
+					branch: "main",
+					isMain: true,
+					isCurrent: true,
+				},
+				{
+					path: wtDir,
+					branch: "feature-auth",
+					isMain: false,
+					isCurrent: false,
+				},
+			];
+
+			const completions = getDirectoryCompletions(
+				"",
+				tempDir,
+				mockHome,
+				[],
+				new Date(),
+				5,
+				mockWorktrees,
+			);
+			expect(completions).not.toBeNull();
+			expect(completions![0].label).toBe("feature-auth/");
+			expect(completions![0].description).toContain("Git worktree");
+		});
+	});
+
+	describe("buildEmptyDirectorySessionOptions", () => {
+		it("provides inherit current session and start new options", () => {
+			const options = buildEmptyDirectorySessionOptions({
+				path: "/sessions/current.jsonl",
+			});
+
+			expect(options).toHaveLength(2);
+			expect(options[0].isFork).toBe(true);
+			expect(options[0].label).toBe(`${NERD_ICONS.git} Inherit current session (fork)`);
+			expect(options[0].sourceSessionPath).toBe("/sessions/current.jsonl");
+			expect(options[1].isNew).toBe(true);
+		});
+	});
+
+	describe("buildUnifiedMoveOptions", () => {
+		it("includes inherit option when in a linked worktree", () => {
+			const mainDir = join(tempDir, "main-repo");
+			const linkedDir = join(tempDir, "linked-wt");
+			mkdirSync(mainDir, { recursive: true });
+			mkdirSync(linkedDir, { recursive: true });
+
+			const worktrees: GitWorktree[] = [
+				{ path: mainDir, branch: "main", isMain: true, isCurrent: false },
+				{ path: linkedDir, branch: "feature-branch", isMain: false, isCurrent: true },
+			];
+
+			const options = buildUnifiedMoveOptions(linkedDir, worktrees, [], mockHome);
+			expect(options.length).toBeGreaterThanOrEqual(2);
+
+			// First option should be inherit from main
+			expect(options[0].action).toBe("inherit_from_main");
+			expect(options[0].label).toContain("Inherit session from main dev folder (main)");
+			expect(options[0].dir).toBe(mainDir);
+
+			// Second option should be switch to main repo worktree
+			expect(options[1].action).toBe("switch_dir");
+			expect(options[1].label).toContain(`${NERD_ICONS.git} main`);
+			expect(options[1].dir).toBe(mainDir);
+		});
+
+		it("does not offer inherit when in main repo worktree", () => {
+			const mainDir = join(tempDir, "main-repo");
+			const linkedDir = join(tempDir, "linked-wt");
+			mkdirSync(mainDir, { recursive: true });
+			mkdirSync(linkedDir, { recursive: true });
+
+			const worktrees: GitWorktree[] = [
+				{ path: mainDir, branch: "main", isMain: true, isCurrent: true },
+				{ path: linkedDir, branch: "feature-branch", isMain: false, isCurrent: false },
+			];
+
+			const options = buildUnifiedMoveOptions(mainDir, worktrees, [], mockHome);
+			expect(options.some((o) => o.action === "inherit_from_main")).toBe(false);
+			expect(options.some((o) => o.action === "switch_dir" && o.dir === linkedDir)).toBe(true);
+		});
+
+		it("includes recent directories deduplicated from worktrees", () => {
+			const recentA = join(tempDir, "recent-a");
+			mkdirSync(recentA, { recursive: true });
+
+			const options = buildUnifiedMoveOptions(
+				tempDir,
+				null,
+				[{ dir: recentA, modified: new Date() }],
+				mockHome,
+			);
+			expect(options).toHaveLength(1);
+			expect(options[0].action).toBe("switch_dir");
+			expect(options[0].dir).toBe(recentA);
+		});
+	});
+
+	describe("createForkedSessionFile", () => {
+		it("forks a session into the target directory with new ID and parentSession", () => {
+			const srcDir = join(tempDir, "src-repo");
+			const dstDir = join(tempDir, "dst-repo");
+			mkdirSync(srcDir, { recursive: true });
+			mkdirSync(dstDir, { recursive: true });
+
+			const originalFile = createNewSessionFile(srcDir);
+			const forkedFile = createForkedSessionFile(originalFile, dstDir);
+
+			expect(existsSync(forkedFile)).toBe(true);
+			const content = readFileSync(forkedFile, "utf8");
+			const entries = parseSessionEntries(content);
+			const header: any = entries[0];
+			expect(header.type).toBe("session");
+			expect(header.cwd).toBe(dstDir);
+			expect(header.parentSession).toBe(originalFile);
 		});
 	});
 });

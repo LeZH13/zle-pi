@@ -8,6 +8,11 @@ import {
 	type SessionInfo,
 } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import {
+	findCurrentWorktree,
+	findMainWorktree,
+	type GitWorktree,
+} from "./git.js";
 
 const IGNORED_DIRECTORIES = new Set([".git", "node_modules", ".turbo", ".next", "dist", "coverage"]);
 
@@ -102,10 +107,17 @@ export function formatSessionSummary(
 	return "(empty session)";
 }
 
+export const NERD_ICONS = {
+	git: "",
+	folder: "",
+} as const;
+
 export interface SessionOptionItem {
 	label: string;
 	sessionPath?: string;
 	isNew: boolean;
+	isFork?: boolean;
+	sourceSessionPath?: string;
 	description?: string;
 }
 
@@ -224,6 +236,62 @@ export function matchRecentDirectory(
 }
 
 /**
+ * Match a worktree against a query by checking branch name, path, or basename.
+ */
+export function matchWorktree(
+	rawQuery: string,
+	worktree: GitWorktree,
+	displayPath: string,
+): boolean {
+	const query = rawQuery.trim();
+	if (!query) return true;
+	const lowerQuery = query.toLowerCase();
+	if (worktree.branch && worktree.branch.toLowerCase().includes(lowerQuery)) {
+		return true;
+	}
+	return matchRecentDirectory(rawQuery, displayPath, worktree.path);
+}
+
+/**
+ * Build autocomplete items for git worktrees.
+ */
+export function buildWorktreeCompletions(
+	worktrees: GitWorktree[],
+	currentCwd: string,
+	query: string,
+	home: string = homedir(),
+): AutocompleteItem[] {
+	const items: AutocompleteItem[] = [];
+	const resolvedCwd = resolve(currentCwd);
+
+	for (const wt of worktrees) {
+		const resolvedPath = resolve(wt.path);
+		if (resolvedPath === resolvedCwd) {
+			continue;
+		}
+
+		const rawDisplay = formatDisplayDir(wt.path, home);
+		const displayPath = rawDisplay.endsWith("/") || rawDisplay.endsWith("\\") ? rawDisplay : `${rawDisplay}/`;
+
+		if (!matchWorktree(query, wt, displayPath)) {
+			continue;
+		}
+
+		const branch = wt.branch ?? basename(wt.path);
+		const role = wt.isMain ? "main repo" : "worktree";
+		const value = displayPath.includes(" ") ? `"${displayPath}"` : displayPath;
+
+		items.push({
+			value,
+			label: `${branch}/`,
+			description: `Git ${role} (${displayPath})`,
+		});
+	}
+
+	return items;
+}
+
+/**
  * Build autocomplete items for matching recent directories.
  */
 export function buildRecentDirectoryCompletions(
@@ -257,9 +325,13 @@ export function buildRecentDirectoryCompletions(
 
 /**
  * Build structured select list items for existing sessions in the target directory,
- * with a new session option at the top.
+ * with a new session option at the top and an optional inherit (fork) option.
  */
-export function buildSessionSelectionOptions(sessions: SessionInfo[], now: Date = new Date()): SessionOptionItem[] {
+export function buildSessionSelectionOptions(
+	sessions: SessionInfo[],
+	now: Date = new Date(),
+	currentSession?: { path?: string; messageCount?: number; name?: string } | null,
+): SessionOptionItem[] {
 	const items: SessionOptionItem[] = [
 		{
 			label: "[+] Start a new session",
@@ -267,6 +339,16 @@ export function buildSessionSelectionOptions(sessions: SessionInfo[], now: Date 
 			description: "Create a fresh session in this directory",
 		},
 	];
+
+	if (currentSession?.path) {
+		items.push({
+			label: `${NERD_ICONS.git} Inherit current session (fork)`,
+			isNew: false,
+			isFork: true,
+			sourceSessionPath: currentSession.path,
+			description: "Fork all conversation context into this directory",
+		});
+	}
 
 	for (let i = 0; i < sessions.length; i++) {
 		const session = sessions[i];
@@ -286,6 +368,124 @@ export function buildSessionSelectionOptions(sessions: SessionInfo[], now: Date 
 	}
 
 	return items;
+}
+
+/**
+ * Build session selection options for a target directory that has no previous sessions,
+ * offering to inherit the current conversation or start fresh.
+ */
+export function buildEmptyDirectorySessionOptions(currentSession: {
+	path: string;
+	name?: string;
+	messageCount?: number;
+}): SessionOptionItem[] {
+	return [
+		{
+			label: `${NERD_ICONS.git} Inherit current session (fork)`,
+			isNew: false,
+			isFork: true,
+			sourceSessionPath: currentSession.path,
+			description: "Fork all conversation context into this directory",
+		},
+		{
+			label: "[+] Start a new session",
+			isNew: true,
+			description: "Create a fresh empty session",
+		},
+	];
+}
+
+/**
+ * Create a new forked session JSONL file in the target directory inheriting from a source session.
+ */
+export function createForkedSessionFile(
+	sourceSessionFile: string,
+	targetDir: string,
+	sessionDirOverride?: string,
+): string {
+	const sm = SessionManager.forkFrom(sourceSessionFile, targetDir, sessionDirOverride);
+	const sessionFile = sm.getSessionFile();
+	if (!sessionFile) {
+		throw new Error(`Failed to create forked session for directory: ${targetDir}`);
+	}
+	return sessionFile;
+}
+
+export interface UnifiedMoveOption {
+	label: string;
+	action: "inherit_from_main" | "switch_dir";
+	dir: string;
+	description?: string;
+}
+
+/**
+ * Build unified options for running /move with no arguments.
+ */
+export function buildUnifiedMoveOptions(
+	currentCwd: string,
+	worktrees: GitWorktree[] | null,
+	recentDirs: RecentDirectoryInfo[],
+	home: string = homedir(),
+	now: Date = new Date(),
+): UnifiedMoveOption[] {
+	const options: UnifiedMoveOption[] = [];
+	const resolvedCwd = resolve(currentCwd);
+
+	if (worktrees && worktrees.length > 0) {
+		const currentWt = findCurrentWorktree(worktrees);
+		const mainWt = findMainWorktree(worktrees);
+
+		// If currently in a linked worktree (not the main worktree), offer to inherit from main
+		if (currentWt && !currentWt.isMain && mainWt) {
+			const mainBranch = mainWt.branch ?? "main";
+			options.push({
+				label: `${NERD_ICONS.git} Inherit session from main dev folder (${mainBranch})`,
+				action: "inherit_from_main",
+				dir: mainWt.path,
+				description: `Adopt session from ${formatDisplayDir(mainWt.path, home)}`,
+			});
+		}
+
+		// List other worktrees in the repo
+		for (const wt of worktrees) {
+			if (resolve(wt.path) === resolvedCwd) continue;
+			const branch = wt.branch ?? basename(wt.path);
+			const role = wt.isMain ? "main repo" : "worktree";
+			const displayPath = formatDisplayDir(wt.path, home);
+			options.push({
+				label: `${NERD_ICONS.git} ${branch} · ${displayPath}`,
+				action: "switch_dir",
+				dir: wt.path,
+				description: `Git ${role}`,
+			});
+		}
+	}
+
+	// List recent directories from session history (excluding current cwd and worktrees already listed)
+	const seenDirs = new Set<string>();
+	if (worktrees) {
+		for (const wt of worktrees) {
+			seenDirs.add(resolve(wt.path));
+		}
+	}
+	seenDirs.add(resolvedCwd);
+
+	for (const { dir, modified } of recentDirs) {
+		const resolvedDir = resolve(dir);
+		if (seenDirs.has(resolvedDir)) continue;
+		seenDirs.add(resolvedDir);
+
+		const timeAgo = formatRelativeTime(modified, now);
+		const displayPath = formatDisplayDir(dir, home);
+		options.push({
+			label: `${NERD_ICONS.folder} ${displayPath}`,
+			action: "switch_dir",
+			dir,
+			description: `Recent (${timeAgo})`,
+		});
+	}
+
+	return options;
 }
 
 /**
@@ -315,7 +515,7 @@ export function createNewSessionFile(targetDir: string, sessionDirOverride?: str
 }
 
 /**
- * Get filesystem and recent directory autocompletion items for the given prefix.
+ * Get filesystem, recent directory, and git worktree autocompletion items for the given prefix.
  */
 export function getDirectoryCompletions(
 	argumentPrefix: string,
@@ -324,9 +524,11 @@ export function getDirectoryCompletions(
 	recentSessions: Array<{ cwd?: string; modified?: Date | string | number }> = [],
 	now: Date = new Date(),
 	limitRecent: number = 5,
+	worktrees: GitWorktree[] = [],
 ): AutocompleteItem[] | null {
 	const rawPrefix = argumentPrefix.trimStart();
 
+	const worktreeItems = buildWorktreeCompletions(worktrees, currentCwd, rawPrefix, home);
 	const recentDirs = extractRecentDirectories(recentSessions, currentCwd, limitRecent);
 	const recentItems = buildRecentDirectoryCompletions(recentDirs, rawPrefix, home, now);
 
@@ -454,9 +656,16 @@ export function getDirectoryCompletions(
 		// Ignore filesystem errors and continue with recent items
 	}
 
-	// Combine recent items and filesystem results, deduplicating by completion value
-	const combined: AutocompleteItem[] = [...recentItems];
-	const seenValues = new Set(recentItems.map((item) => item.value));
+	// Combine worktrees, recent items, and filesystem results, deduplicating by completion value
+	const combined: AutocompleteItem[] = [...worktreeItems];
+	const seenValues = new Set(worktreeItems.map((item) => item.value));
+
+	for (const item of recentItems) {
+		if (!seenValues.has(item.value)) {
+			seenValues.add(item.value);
+			combined.push(item);
+		}
+	}
 
 	for (const item of fsResults) {
 		if (!seenValues.has(item.value)) {

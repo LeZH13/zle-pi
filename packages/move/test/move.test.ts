@@ -3,8 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type ExtensionAPI, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as gitModule from "../extensions/git.js";
 import moveExtension from "../extensions/move.js";
-import { createNewSessionFile } from "../extensions/utils.js";
+import { createNewSessionFile, NERD_ICONS } from "../extensions/utils.js";
 
 describe("move extension", () => {
 	const originalCwd = process.cwd();
@@ -17,6 +18,9 @@ describe("move extension", () => {
 		process.chdir(originalCwd);
 		tempDir = join(tmpdir(), `pi-move-cmd-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
+
+		// Default SessionManager.listAll to empty array to avoid scanning real ~/.pi/agent/sessions/
+		vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
 
 		registeredCommands = new Map();
 		registeredListeners = new Map();
@@ -34,6 +38,7 @@ describe("move extension", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		try {
 			process.chdir(originalCwd);
 			rmSync(tempDir, { recursive: true, force: true });
@@ -101,37 +106,56 @@ describe("move extension", () => {
 		expect(notifyMock).toHaveBeenCalledWith(expect.stringContaining("requires an interactive UI"), "error");
 	});
 
-	it("requires a destination path argument", async () => {
+	it("opens the unified move selector when no arguments are provided", async () => {
 		const command = registeredCommands.get("move");
+		const selectMock = vi.fn().mockResolvedValue(undefined);
 		const notifyMock = vi.fn();
+
+		const otherDir = join(tempDir, "other-proj");
+		mkdirSync(otherDir, { recursive: true });
+
+		vi.spyOn(SessionManager, "listAll").mockResolvedValueOnce([
+			{
+				path: "/sessions/s1.jsonl",
+				id: "s1",
+				cwd: otherDir,
+				created: new Date(),
+				modified: new Date(),
+				messageCount: 2,
+			},
+		] as any);
 
 		const mockCtx = {
 			hasUI: true,
-			ui: { notify: notifyMock },
+			ui: { select: selectMock, notify: notifyMock },
 			cwd: tempDir,
 		};
 
 		await command.handler("", mockCtx);
-		expect(notifyMock).toHaveBeenCalledWith(
-			"A destination path is required. Usage: /move <path>",
-			"error",
+		expect(selectMock).toHaveBeenCalledWith(
+			"Select destination or action:",
+			expect.arrayContaining([expect.stringContaining(NERD_ICONS.folder)]),
 		);
+		expect(notifyMock).toHaveBeenCalledWith("Move cancelled", "info");
 	});
 
-	it("rejects an empty quoted destination path", async () => {
+	it("notifies when no worktrees or recent directories are available on empty input", async () => {
 		const command = registeredCommands.get("move");
 		const notifyMock = vi.fn();
+		const selectMock = vi.fn();
+
+		vi.spyOn(SessionManager, "listAll").mockResolvedValueOnce([]);
 
 		const mockCtx = {
 			hasUI: true,
-			ui: { notify: notifyMock },
+			ui: { select: selectMock, notify: notifyMock },
 			cwd: tempDir,
 		};
 
-		await command.handler('"   "', mockCtx);
+		await command.handler('""', mockCtx);
 		expect(notifyMock).toHaveBeenCalledWith(
-			"A destination path is required. Usage: /move <path>",
-			"error",
+			"No other worktrees or recent directories found",
+			"info",
 		);
 	});
 
@@ -325,6 +349,139 @@ describe("move extension", () => {
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(replacementNotifyMock).toHaveBeenCalledWith(
 			expect.stringContaining("(new session)"),
+			"info",
+		);
+	});
+
+	it("inherits session from main repo when selected in unified selector", async () => {
+		const command = registeredCommands.get("move");
+		const mainDir = join(tempDir, "main-repo");
+		const wtDir = join(tempDir, "linked-wt");
+		mkdirSync(mainDir, { recursive: true });
+		mkdirSync(wtDir, { recursive: true });
+
+		vi.spyOn(gitModule, "getGitWorktrees").mockResolvedValueOnce([
+			{ path: mainDir, branch: "main", isMain: true, isCurrent: false },
+			{ path: wtDir, branch: "feature-branch", isMain: false, isCurrent: true },
+		]);
+
+		const mainSessionFile = createNewSessionFile(mainDir);
+		vi.spyOn(SessionManager, "list").mockResolvedValueOnce([
+			{
+				path: mainSessionFile,
+				id: "main-sess",
+				cwd: mainDir,
+				name: "Architecture planning",
+				firstMessage: "Plan architecture",
+				created: new Date(),
+				modified: new Date(),
+				messageCount: 10,
+				allMessagesText: "Plan architecture",
+			},
+		] as any);
+
+		const selectMock = vi
+			.fn()
+			.mockResolvedValueOnce(`${NERD_ICONS.git} Inherit session from main dev folder (main)`)
+			.mockResolvedValueOnce("[●] Architecture planning (just now) [most recent]");
+
+		const replacementNotifyMock = vi.fn();
+		const switchSessionMock = vi.fn().mockImplementation(async (sessionFile, options) => {
+			if (options?.withSession) {
+				const replacementCtx = { ui: { notify: replacementNotifyMock } };
+				await options.withSession(replacementCtx);
+			}
+			return { cancelled: false };
+		});
+		const notifyMock = vi.fn();
+
+		const mockCtx = {
+			hasUI: true,
+			ui: { select: selectMock, notify: notifyMock },
+			cwd: wtDir,
+			switchSession: switchSessionMock,
+		};
+
+		await command.handler("", mockCtx);
+		expect(switchSessionMock).toHaveBeenCalledWith(
+			expect.stringMatching(/\.jsonl$/),
+			expect.any(Object),
+		);
+	});
+
+	it("resolves worktree by branch name argument", async () => {
+		const command = registeredCommands.get("move");
+		const mainDir = join(tempDir, "main-repo");
+		const wtDir = join(tempDir, "worktrees", "git-alias");
+		mkdirSync(mainDir, { recursive: true });
+		mkdirSync(wtDir, { recursive: true });
+
+		vi.spyOn(gitModule, "getGitWorktrees").mockResolvedValueOnce([
+			{ path: mainDir, branch: "main", isMain: true, isCurrent: true },
+			{ path: wtDir, branch: "git-alias", isMain: false, isCurrent: false },
+		]);
+
+		const switchSessionMock = vi.fn().mockResolvedValue({ cancelled: false });
+		const notifyMock = vi.fn();
+
+		const mockCtx = {
+			hasUI: true,
+			ui: { select: vi.fn(), notify: notifyMock },
+			cwd: mainDir,
+			switchSession: switchSessionMock,
+		};
+
+		await command.handler("git-alias", mockCtx);
+		expect(switchSessionMock).toHaveBeenCalledWith(
+			expect.stringMatching(/\.jsonl$/),
+			expect.any(Object),
+		);
+	});
+
+	it("prompts to inherit current session when moving to an empty target directory", async () => {
+		const command = registeredCommands.get("move");
+		const targetDir = join(tempDir, "empty-target-with-inherit");
+		mkdirSync(targetDir, { recursive: true });
+
+		const currentSessionFile = createNewSessionFile(tempDir);
+		const selectMock = vi.fn().mockImplementation(async (_title, options: string[]) => {
+			// Choose inherit current session (fork)
+			return options[0];
+		});
+		const replacementNotifyMock = vi.fn();
+		const switchSessionMock = vi.fn().mockImplementation(async (sessionFile, options) => {
+			if (options?.withSession) {
+				const replacementCtx = { ui: { notify: replacementNotifyMock } };
+				await options.withSession(replacementCtx);
+			}
+			return { cancelled: false };
+		});
+		const notifyMock = vi.fn();
+
+		const mockCtx = {
+			hasUI: true,
+			ui: { select: selectMock, notify: notifyMock },
+			cwd: tempDir,
+			sessionManager: {
+				getSessionFile: () => currentSessionFile,
+				getEntries: () => [{ type: "message", id: "m1", message: { role: "user", content: "hello" } }],
+			},
+			switchSession: switchSessionMock,
+		};
+
+		await command.handler(targetDir, mockCtx);
+		expect(selectMock).toHaveBeenCalledWith(
+			expect.stringContaining("Select session in"),
+			expect.arrayContaining([expect.stringContaining("Inherit current session")]),
+		);
+		expect(switchSessionMock).toHaveBeenCalledWith(
+			expect.stringMatching(/\.jsonl$/),
+			expect.any(Object),
+		);
+
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(replacementNotifyMock).toHaveBeenCalledWith(
+			expect.stringContaining("(forked session)"),
 			"info",
 		);
 	});
