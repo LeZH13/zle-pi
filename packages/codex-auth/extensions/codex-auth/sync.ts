@@ -109,7 +109,8 @@ export function syncCodexToPi(): { changed: boolean; accountId?: string } {
 
 /**
  * Bi-directional sync: If Pi refreshed tokens in ~/.pi/agent/auth.json,
- * write the updated tokens back to ~/.codex/auth.json and its managed snapshot.
+ * write the updated tokens back to the account's managed snapshot,
+ * and update ~/.codex/auth.json ONLY if this account is currently active.
  */
 export function syncPiToCodex(): { changed: boolean } {
 	const piAuth = loadPiAuth();
@@ -119,14 +120,77 @@ export function syncPiToCodex(): { changed: boolean } {
 	}
 
 	const codexAuth = loadCodexAuth();
+	const registry = loadRegistry();
+	let snapshotUpdated = false;
+
+	// 1. Update the account snapshot file under ~/.codex/accounts/
+	const accountsDir = path.join(getCodexHome(), "accounts");
+	if (fs.existsSync(accountsDir)) {
+		const matchedAccount = registry?.accounts.find(
+			(acc) => acc.chatgpt_account_id === piCodex.accountId || acc.account_key.includes(piCodex.accountId),
+		);
+
+		const candidateFiles = fs.readdirSync(accountsDir).filter((f) => f.endsWith(".auth.json") && !f.includes(".bak"));
+		for (const file of candidateFiles) {
+			const fullPath = path.join(accountsDir, file);
+			try {
+				const snap = JSON.parse(fs.readFileSync(fullPath, "utf8")) as CodexAuthFile;
+				const snapAccountId = snap.tokens?.account_id;
+				const isTarget =
+					snapAccountId === piCodex.accountId ||
+					(matchedAccount && file === `${Buffer.from(matchedAccount.account_key).toString("base64url")}.auth.json`);
+
+				if (isTarget && snap.tokens) {
+					if (snap.tokens.access_token !== piCodex.access || snap.tokens.refresh_token !== piCodex.refresh) {
+						snap.tokens.access_token = piCodex.access;
+						snap.tokens.refresh_token = piCodex.refresh;
+						snap.last_refresh = new Date().toISOString();
+						const snapTmp = `${fullPath}.tmp.${Date.now()}`;
+						fs.writeFileSync(snapTmp, JSON.stringify(snap, null, 2), { mode: 0o600 });
+						fs.renameSync(snapTmp, fullPath);
+						snapshotUpdated = true;
+					}
+				}
+			} catch {
+				// Ignore invalid snapshot files
+			}
+		}
+	}
+
+	// 2. Only update ~/.codex/auth.json if BOTH registry and current auth.json agree that
+	// this account is active. If registry.json says account B is active while contaminated
+	// auth.json contains account A, Pi must NOT write account A back into auth.json
+	// (which would perpetuate AccountIdMismatch).
+
+	// Fail closed if registry declares an active key but the account cannot be identified
+	if (registry?.active_account_key) {
+		const activeRegistryAccount = registry.accounts.find(
+			(a) => a.account_key === registry.active_account_key,
+		);
+		if (!activeRegistryAccount) {
+			// Cannot verify declared active account -> fail closed
+			return { changed: snapshotUpdated };
+		}
+		const matchesRegistry =
+			activeRegistryAccount.chatgpt_account_id === piCodex.accountId ||
+			activeRegistryAccount.account_key.includes(piCodex.accountId);
+		if (!matchesRegistry) {
+			return { changed: snapshotUpdated };
+		}
+	}
+
+	// Active auth.json must not belong to a different account
+	if (codexAuth?.tokens?.account_id && codexAuth.tokens.account_id !== piCodex.accountId) {
+		return { changed: snapshotUpdated };
+	}
+
 	if (
-		codexAuth &&
-		codexAuth.tokens &&
+		codexAuth?.tokens &&
 		codexAuth.tokens.access_token === piCodex.access &&
 		codexAuth.tokens.refresh_token === piCodex.refresh &&
 		codexAuth.tokens.account_id === piCodex.accountId
 	) {
-		return { changed: false };
+		return { changed: snapshotUpdated };
 	}
 
 	// Update ~/.codex/auth.json
@@ -149,41 +213,9 @@ export function syncPiToCodex(): { changed: boolean } {
 		fs.writeFileSync(tmp, JSON.stringify(updatedCodexAuth, null, 2), { mode: 0o600 });
 		fs.renameSync(tmp, targetPath);
 
-		// Also update the account snapshot file under ~/.codex/accounts/
-		const accountsDir = path.join(getCodexHome(), "accounts");
-		if (fs.existsSync(accountsDir)) {
-			const registry = loadRegistry();
-			const matchedAccount = registry?.accounts.find(
-				(acc) => acc.chatgpt_account_id === piCodex.accountId || acc.account_key.includes(piCodex.accountId),
-			);
-
-			const candidateFiles = fs.readdirSync(accountsDir).filter((f) => f.endsWith(".auth.json") && !f.includes(".bak"));
-			for (const file of candidateFiles) {
-				const fullPath = path.join(accountsDir, file);
-				try {
-					const snap = JSON.parse(fs.readFileSync(fullPath, "utf8")) as CodexAuthFile;
-					const snapAccountId = snap.tokens?.account_id;
-					const isTarget =
-						snapAccountId === piCodex.accountId ||
-						(matchedAccount && file === `${Buffer.from(matchedAccount.account_key).toString("base64url")}.auth.json`);
-
-					if (isTarget && snap.tokens) {
-						snap.tokens.access_token = piCodex.access;
-						snap.tokens.refresh_token = piCodex.refresh;
-						snap.last_refresh = updatedCodexAuth.last_refresh;
-						const snapTmp = `${fullPath}.tmp.${Date.now()}`;
-						fs.writeFileSync(snapTmp, JSON.stringify(snap, null, 2), { mode: 0o600 });
-						fs.renameSync(snapTmp, fullPath);
-					}
-				} catch {
-					// Ignore invalid snapshot files
-				}
-			}
-		}
-
 		return { changed: true };
 	} catch {
-		return { changed: false };
+		return { changed: snapshotUpdated };
 	}
 }
 

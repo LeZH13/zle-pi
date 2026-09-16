@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { loadCodexAuth, loadRegistry, maskEmail, maskId } from "./registry.js";
+import { formatAccountIdentifier, getDisplayOrderedAccounts, loadCodexAuth, loadRegistry, maskEmail, maskId } from "./registry.js";
 import type { CodexAccount, CodexAuthConfig, CodexRegistry } from "./types.js";
 
 /**
@@ -65,7 +65,7 @@ export function getActiveAccount(registry: CodexRegistry | null): CodexAccount |
 
 /** Format an account's display label */
 export function getAccountLabel(acc: CodexAccount): string {
-	const name = acc.alias || maskEmail(acc.email) || maskId(acc.chatgpt_account_id);
+	const name = formatAccountIdentifier(acc);
 	const plan = acc.plan ? ` (${acc.plan.toLowerCase()})` : "";
 	return `${name}${plan}`;
 }
@@ -78,12 +78,13 @@ export function buildWidgetLine(
 ): string {
 	if (width <= 0) return "";
 
-	const rawName = active.alias || maskEmail(active.email) || maskId(active.chatgpt_account_id);
+	const rawName = formatAccountIdentifier(active);
 	const rawPlan = active.plan ? ` (${active.plan.toLowerCase()})` : "";
-	const u5h = calculateRemainingPercent(active.last_usage?.primary?.used_percent);
-	const r5h = formatResetTime(active.last_usage?.primary?.resets_at);
-	const uWeek = calculateRemainingPercent(active.last_usage?.secondary?.used_percent);
-	const rWeek = formatResetTime(active.last_usage?.secondary?.resets_at);
+	const usage = active.usage ?? active.last_usage;
+	const u5h = calculateRemainingPercent(usage?.primary?.used_percent);
+	const r5h = formatResetTime(usage?.primary?.resets_at);
+	const uWeek = calculateRemainingPercent(usage?.secondary?.used_percent);
+	const rWeek = formatResetTime(usage?.secondary?.resets_at);
 
 	const tag = theme.fg("dim", "codex: ");
 	const sep = theme.fg("dim", " • ");
@@ -140,7 +141,7 @@ export function refreshUI(ctx: ExtensionContext, config: CodexAuthConfig): void 
 	// 1. Pi Footer Status Badge (Compact & Dimmed)
 	if (config.footerEnabled) {
 		if (active) {
-			const label = active.alias || maskEmail(active.email);
+			const label = formatAccountIdentifier(active);
 			const plan = active.plan ? ` (${active.plan.toLowerCase()})` : "";
 			ctx.ui.setStatus("codex-auth", `codex: ${label}${plan}`);
 		} else {
@@ -185,21 +186,25 @@ export async function promptAccountPicker(
 	}
 
 	const active = getActiveAccount(registry);
-	const options = registry.accounts.map((acc, index) => {
+	const orderedAccounts = getDisplayOrderedAccounts(registry);
+	const options = orderedAccounts.map((acc, index) => {
 		const isActive = active?.account_key === acc.account_key;
 		const tag = isActive ? " [ACTIVE]" : "";
 		const aliasPart = acc.alias ? `[${acc.alias}] ` : "";
-		const emailPart = maskEmail(acc.email);
+		const emailPart = acc.email ? maskEmail(acc.email) : (acc.account_name || maskId(acc.chatgpt_account_id));
 		const planPart = acc.plan ? ` (${acc.plan.toLowerCase()})` : "";
 
-		const rawU5h = acc.last_usage?.primary?.used_percent;
+		const usage = acc.usage ?? acc.last_usage;
+		const rawU5h = usage?.primary?.used_percent;
 		const u5hStr = typeof rawU5h === "number" ? ` • 5h: ${calculateRemainingPercent(rawU5h)}%` : "";
-		const rawUWeek = acc.last_usage?.secondary?.used_percent;
+		const rawUWeek = usage?.secondary?.used_percent;
 		const uWeekStr = typeof rawUWeek === "number" ? ` • wk: ${calculateRemainingPercent(rawUWeek)}%` : "";
+		const resetCreditsStr = usage?.reset_credits != null ? ` • reset: ${usage.reset_credits}` : "";
+		const creditsStr = usage?.credits?.has_credits && usage.credits.balance ? ` • $${usage.credits.balance}` : "";
 
 		return {
 			id: acc.account_key,
-			label: `${index + 1}. ${aliasPart}${emailPart}${planPart}${tag}${u5hStr}${uWeekStr}`,
+			label: `${index + 1}. ${aliasPart}${emailPart}${planPart}${tag}${u5hStr}${uWeekStr}${resetCreditsStr}${creditsStr}`,
 		};
 	});
 

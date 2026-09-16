@@ -12,7 +12,18 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
-import { loadConfig, loadRegistry, maskEmail, saveConfig, switchActiveAccount } from "./registry.js";
+import {
+	clearAccountAlias,
+	formatAccountIdentifier,
+	getDisplayOrderedAccounts,
+	loadConfig,
+	loadRegistry,
+	maskEmail,
+	maskId,
+	saveConfig,
+	setAccountAlias,
+	switchActiveAccount,
+} from "./registry.js";
 import { setupCodexAuthWatcher, syncCodexToPi, syncPiToCodex } from "./sync.js";
 import type { CodexAuthConfig } from "./types.js";
 import {
@@ -43,22 +54,27 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 		syncCodexToPi();
 		refreshUI(ctx, config);
 
-		const accountDesc = result.account?.alias || maskEmail(result.account?.email);
+		const accountDesc = formatAccountIdentifier(result.account);
 		ctx.ui.notify(`Switched Codex account to '${accountDesc}'`, "info");
 	}
 
 	// Register /codex-auth slash command with rich autocomplete
 	pi.registerCommand("codex-auth", {
-		description: "OpenAI Codex account switcher & quota monitor (/codex-auth [switch|status|sync|widget|footer])",
+		description: "OpenAI Codex account switcher & quota monitor (/codex-auth [switch|list|status|alias|sync|widget|footer])",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
 			const normPrefix = prefix.trimStart().toLowerCase();
 			const registry = loadRegistry();
-			const accounts = registry?.accounts || [];
+			const accounts = registry ? getDisplayOrderedAccounts(registry) : [];
+			const prevKey = registry?.previous_active_account_key;
+			const prevAcc = prevKey ? accounts.find((a) => a.account_key === prevKey) : null;
+			const prevDesc = formatAccountIdentifier(prevAcc);
 
 			// 1. Subcommand suggestions
 			const subcommands: AutocompleteItem[] = [
 				{ value: "switch", label: "switch", description: "Switch active Codex account" },
+				{ value: "list", label: "list", description: "Show registered accounts and rate limits" },
 				{ value: "status", label: "status", description: "Show registered accounts and rate limits" },
+				{ value: "alias", label: "alias", description: "Manage account alias (set|clear)" },
 				{ value: "sync", label: "sync", description: "Force bi-directional token sync" },
 				{ value: "widget", label: "widget", description: "Toggle 2nd-line widget below editor" },
 				{ value: "footer", label: "footer", description: "Toggle footer status badge" },
@@ -67,23 +83,44 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 			// 2. If typing after 'switch '
 			if (normPrefix.startsWith("switch ")) {
 				const query = normPrefix.slice(7).trim();
-				const items: AutocompleteItem[] = accounts.map((acc) => {
-					const val = acc.alias || acc.account_key;
-					const label = acc.alias || maskEmail(acc.email);
+				const items: AutocompleteItem[] = [];
+
+				if (prevAcc) {
+					items.push({
+						value: "switch -",
+						label: "switch -",
+						description: `Switch to previous account (${prevDesc})`,
+					});
+				}
+
+				for (const acc of accounts) {
+					const val = acc.alias || acc.email || acc.account_name || acc.account_key;
+					const label = formatAccountIdentifier(acc);
 					const plan = acc.plan ? ` (${acc.plan.toUpperCase()})` : "";
-					return {
+					items.push({
 						value: `switch ${val}`,
 						label: `switch ${label}`,
-						description: `${maskEmail(acc.email)}${plan}`,
-					};
-				});
+						description: `${label}${plan}`,
+					});
+				}
+
 				const matched = items.filter(
 					(i) => !query || i.value.toLowerCase().includes(query) || i.label.toLowerCase().includes(query),
 				);
 				return matched.length > 0 ? matched : null;
 			}
 
-			// 3. If typing after 'widget '
+			// 3. If typing after 'alias '
+			if (normPrefix.startsWith("alias ")) {
+				const opts: AutocompleteItem[] = [
+					{ value: "alias set", label: "alias set", description: "Set alias: /codex-auth alias set <query> <alias>" },
+					{ value: "alias clear", label: "alias clear", description: "Clear alias: /codex-auth alias clear <query>" },
+				];
+				const matched = opts.filter((o) => o.value.startsWith(normPrefix));
+				return matched.length > 0 ? matched : null;
+			}
+
+			// 4. If typing after 'widget '
 			if (normPrefix.startsWith("widget ")) {
 				const opts: AutocompleteItem[] = [
 					{ value: "widget on", label: "widget on", description: "Show quota progress line below editor" },
@@ -93,7 +130,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return matched.length > 0 ? matched : null;
 			}
 
-			// 4. If typing after 'footer '
+			// 5. If typing after 'footer '
 			if (normPrefix.startsWith("footer ")) {
 				const opts: AutocompleteItem[] = [
 					{ value: "footer on", label: "footer on", description: "Show footer status badge" },
@@ -103,17 +140,27 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return matched.length > 0 ? matched : null;
 			}
 
-			// 5. Default completions: subcommands + direct account switch shortcuts
-			const directAccountSuggestions: AutocompleteItem[] = accounts.map((acc) => {
-				const val = acc.alias || acc.account_key;
-				const label = acc.alias || maskEmail(acc.email);
+			// 6. Default completions: subcommands + previous shortcut + direct switch shortcuts
+			const directAccountSuggestions: AutocompleteItem[] = [];
+
+			if (prevAcc) {
+				directAccountSuggestions.push({
+					value: "-",
+					label: "-",
+					description: `Switch to previous account (${prevDesc})`,
+				});
+			}
+
+			for (const acc of accounts) {
+				const val = acc.alias || acc.email || acc.account_name || acc.account_key;
+				const label = formatAccountIdentifier(acc);
 				const plan = acc.plan ? ` (${acc.plan.toUpperCase()})` : "";
-				return {
+				directAccountSuggestions.push({
 					value: val,
 					label,
 					description: `Switch directly to ${label}${plan}`,
-				};
-			});
+				});
+			}
 
 			const all = [...subcommands, ...directAccountSuggestions];
 			const filtered = all.filter(
@@ -168,7 +215,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// 4. /codex-auth status
+			// 4. /codex-auth status or /codex-auth list
 			if (sub === "status" || sub === "list") {
 				const registry = loadRegistry();
 				if (!registry || registry.accounts.length === 0) {
@@ -177,40 +224,83 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				}
 
 				const active = getActiveAccount(registry);
+				const orderedAccounts = getDisplayOrderedAccounts(registry);
 				const lines: string[] = ["\n--- OpenAI Codex Accounts ---"];
 
-				for (let i = 0; i < registry.accounts.length; i++) {
-					const acc = registry.accounts[i];
+				for (let i = 0; i < orderedAccounts.length; i++) {
+					const acc = orderedAccounts[i];
 					if (!acc) continue;
 					const isActive = active?.account_key === acc.account_key;
 					const marker = isActive ? " [ACTIVE]" : "";
 					const alias = acc.alias ? `[${acc.alias}] ` : "";
-					const email = maskEmail(acc.email);
+					const email = acc.email ? maskEmail(acc.email) : (acc.account_name || maskId(acc.chatgpt_account_id));
 					const plan = acc.plan ? `(${acc.plan.toUpperCase()})` : "";
-					const u5h = calculateRemainingPercent(acc.last_usage?.primary?.used_percent);
-					const r5h = formatResetTime(acc.last_usage?.primary?.resets_at);
-					const uWk = calculateRemainingPercent(acc.last_usage?.secondary?.used_percent);
-					const rWk = formatResetTime(acc.last_usage?.secondary?.resets_at);
+					const usage = acc.usage ?? acc.last_usage;
+					const u5h = calculateRemainingPercent(usage?.primary?.used_percent);
+					const r5h = formatResetTime(usage?.primary?.resets_at);
+					const uWk = calculateRemainingPercent(usage?.secondary?.used_percent);
+					const rWk = formatResetTime(usage?.secondary?.resets_at);
 
 					lines.push(
 						`  ${i + 1}. ${alias}${email} ${plan}${marker}`,
 						`     5h:     ${formatProgressBar(u5h, 10)} ${r5h ? `(${r5h})` : ""}`,
 						`     Weekly: ${formatProgressBar(uWk, 10)} ${rWk ? `(${rWk})` : ""}`,
 					);
+
+					if (usage?.reset_credits != null || (usage?.credits?.has_credits && usage.credits.balance)) {
+						const creditParts: string[] = [];
+						if (usage?.credits?.has_credits && usage.credits.balance) {
+							creditParts.push(`Balance: $${usage.credits.balance}`);
+						}
+						if (usage?.reset_credits != null) {
+							creditParts.push(`Reset Credits: ${usage.reset_credits}`);
+						}
+						lines.push(`     Credits: ${creditParts.join(" • ")}`);
+					}
 				}
 				lines.push("-----------------------------\\n");
 				ctx.ui.notify(lines.join("\n"), "info");
 				return;
 			}
 
-			// 5. /codex-auth switch <query>
+			// 5. /codex-auth alias [set <query> <alias> | clear <query>]
+			if (sub === "alias") {
+				const action = parts[1]?.toLowerCase();
+				if (action === "set") {
+					if (parts.length < 4) {
+						ctx.ui.notify("Usage: /codex-auth alias set <query> <alias>", "error");
+						return;
+					}
+					const alias = parts[parts.length - 1]!;
+					const query = parts.slice(2, -1).join(" ");
+					const res = setAccountAlias(query, alias);
+					refreshUI(ctx, config);
+					ctx.ui.notify(res.message, res.success ? "info" : "error");
+					return;
+				}
+				if (action === "clear") {
+					const query = parts.slice(2).join(" ").trim();
+					if (!query) {
+						ctx.ui.notify("Usage: /codex-auth alias clear <query>", "error");
+						return;
+					}
+					const res = clearAccountAlias(query);
+					refreshUI(ctx, config);
+					ctx.ui.notify(res.message, res.success ? "info" : "error");
+					return;
+				}
+				ctx.ui.notify("Usage: /codex-auth alias set <query> <alias> | /codex-auth alias clear <query>", "info");
+				return;
+			}
+
+			// 6. /codex-auth switch <query> (including /codex-auth switch -)
 			if (sub === "switch") {
 				const query = parts.slice(1).join(" ");
 				if (!query) {
 					if (ctx.hasUI) {
 						await promptAccountPicker(ctx, (key) => executeSwitch(key, ctx));
 					} else {
-						ctx.ui.notify("Usage: /codex-auth switch <alias|query>", "error");
+						ctx.ui.notify("Usage: /codex-auth switch <alias|email|number|query|->", "error");
 					}
 					return;
 				}
@@ -218,13 +308,19 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// 6. Direct query (e.g. `/codex-auth work`) or default interactive picker
+			// 7. /codex-auth - (jump to previous account)
+			if (trimmed === "-") {
+				await executeSwitch("-", ctx);
+				return;
+			}
+
+			// 8. Direct query (e.g. `/codex-auth work` or `/codex-auth 1`) or default interactive picker
 			if (trimmed) {
 				await executeSwitch(trimmed, ctx);
 			} else if (ctx.hasUI) {
 				await promptAccountPicker(ctx, (key) => executeSwitch(key, ctx));
 			} else {
-				ctx.ui.notify("Usage: /codex-auth [switch <query>|status|sync|widget|footer]", "info");
+				ctx.ui.notify("Usage: /codex-auth [switch <query>|list|status|alias|sync|widget|footer|-]", "info");
 			}
 		},
 	});

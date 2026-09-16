@@ -1,10 +1,23 @@
+import * as childProcess from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import codexAuthExtension from "../extensions/codex-auth/index.js";
-import { findAccount, getCodexAuthConfigPath, loadConfig, maskEmail, maskId, saveConfig } from "../extensions/codex-auth/registry.js";
+import {
+	findAccount,
+	getCodexAuthConfigPath,
+	getDisplayOrderedAccounts,
+	loadConfig,
+	maskEmail,
+	maskId,
+	resetCommandExecutor,
+	resolveAccount,
+	saveConfig,
+	setCommandExecutor,
+	switchActiveAccount,
+} from "../extensions/codex-auth/registry.js";
 import { extractJwtExpiry, syncCodexToPi, syncPiToCodex } from "../extensions/codex-auth/sync.js";
 import type { CodexAuthFile, CodexRegistry, PiAuthStore } from "../extensions/codex-auth/types.js";
 import {
@@ -38,6 +51,10 @@ describe("codex-auth extension", () => {
 		codexAuthExtension(mockPi);
 	});
 
+	afterEach(() => {
+		resetCommandExecutor();
+	});
+
 	it("registers the /codex-auth command with lifecycle listeners", () => {
 		expect(mockPi.registerCommand).toHaveBeenCalledWith(
 			"codex-auth",
@@ -62,6 +79,25 @@ describe("codex-auth extension", () => {
 			expect(maskId("e2774859-949b-4f76-8c93-298e1260ea4e")).toBe("e2774859...");
 			expect(maskId("short")).toBe("short");
 			expect(maskId(undefined)).toBe("unknown");
+		});
+
+		it("falls back to account_name and ID when email is absent or undefined", () => {
+			const accWithName: any = {
+				account_key: "acc-no-email",
+				account_name: "Acme Org",
+				chatgpt_account_id: "e2774859-949b-4f76-8c93-298e1260ea4e",
+				plan: "business",
+			};
+			const mockTheme = { fg: (_c: string, text: string) => text };
+			const widgetLine = buildWidgetLine(mockTheme, accWithName, 80);
+			expect(widgetLine).toContain("Acme Org (business)");
+
+			const accWithIdOnly: any = {
+				account_key: "acc-id-only",
+				chatgpt_account_id: "e2774859-949b-4f76-8c93-298e1260ea4e",
+			};
+			const widgetLineId = buildWidgetLine(mockTheme, accWithIdOnly, 80);
+			expect(widgetLineId).toContain("e2774859...");
 		});
 
 		it("formats progress bars properly", () => {
@@ -120,10 +156,12 @@ describe("codex-auth extension", () => {
 		const mockRegistry: CodexRegistry = {
 			schema_version: 4,
 			active_account_key: "acc-1",
+			previous_active_account_key: "acc-2",
 			accounts: [
 				{
 					account_key: "acc-1",
 					alias: "work",
+					account_name: "Acme Corp",
 					email: "work@example.com",
 					chatgpt_account_id: "id-work-123",
 					plan: "plus",
@@ -131,6 +169,7 @@ describe("codex-auth extension", () => {
 				{
 					account_key: "acc-2",
 					alias: "personal",
+					account_name: "Personal Projects",
 					email: "personal@example.com",
 					chatgpt_account_id: "id-personal-456",
 					plan: "pro",
@@ -138,11 +177,20 @@ describe("codex-auth extension", () => {
 			],
 		};
 
-		it("finds accounts by alias, email, and ID", () => {
+		it("finds accounts by alias, email, ID, account_name, row number, and previous shortcut", () => {
 			expect(findAccount(mockRegistry, "work")?.account_key).toBe("acc-1");
 			expect(findAccount(mockRegistry, "personal")?.account_key).toBe("acc-2");
 			expect(findAccount(mockRegistry, "work@example.com")?.account_key).toBe("acc-1");
 			expect(findAccount(mockRegistry, "id-personal-456")?.account_key).toBe("acc-2");
+			expect(findAccount(mockRegistry, "Acme")?.account_key).toBe("acc-1");
+			expect(findAccount(mockRegistry, "Personal Projects")?.account_key).toBe("acc-2");
+			// In v0.3 display order, personal@example.com sorts before work@example.com
+			expect(findAccount(mockRegistry, "1")?.account_key).toBe("acc-2");
+			expect(findAccount(mockRegistry, "2")?.account_key).toBe("acc-1");
+			expect(findAccount(mockRegistry, "01")?.account_key).toBe("acc-2");
+			expect(findAccount(mockRegistry, "02")?.account_key).toBe("acc-1");
+			expect(findAccount(mockRegistry, "001")?.account_key).toBe("acc-2");
+			expect(findAccount(mockRegistry, "-")?.account_key).toBe("acc-2");
 			expect(findAccount(mockRegistry, "nonexistent")).toBeNull();
 		});
 
@@ -241,7 +289,7 @@ describe("codex-auth extension", () => {
 	});
 
 	describe("autocomplete suggestions", () => {
-		it("provides subcommand and account suggestions", () => {
+		it("provides subcommand and account suggestions including list, alias, and shortcuts", () => {
 			const cmd = registeredCommands.get("codex-auth");
 			expect(cmd).toBeDefined();
 
@@ -249,10 +297,46 @@ describe("codex-auth extension", () => {
 			expect(completions).toBeInstanceOf(Array);
 			const values = completions.map((c: any) => c.value);
 			expect(values).toContain("switch");
+			expect(values).toContain("list");
 			expect(values).toContain("status");
+			expect(values).toContain("alias");
 			expect(values).toContain("sync");
 			expect(values).toContain("widget");
 			expect(values).toContain("footer");
+		});
+
+		it("handles multi-word query in alias set and clear commands", async () => {
+			const cmd = registeredCommands.get("codex-auth");
+			const calls: Array<{ cmd: string; args: string[] }> = [];
+			setCommandExecutor((cmdName, args) => {
+				calls.push({ cmd: cmdName, args });
+				return Buffer.from("");
+			});
+
+			const mockCtx = {
+				hasUI: true,
+				ui: {
+					notify: vi.fn(),
+					setStatus: vi.fn(),
+					setWidget: vi.fn(),
+				},
+			} as unknown as ExtensionCommandContext;
+
+			// /codex-auth alias set Personal Projects work
+			await cmd.handler("alias set Personal Projects work", mockCtx);
+			expect(calls[0]).toEqual({
+				cmd: "codex-auth",
+				args: ["alias", "set", "Personal Projects", "work"],
+			});
+
+			// /codex-auth alias clear Personal Projects
+			await cmd.handler("alias clear Personal Projects", mockCtx);
+			expect(calls[1]).toEqual({
+				cmd: "codex-auth",
+				args: ["alias", "clear", "Personal Projects"],
+			});
+
+			resetCommandExecutor();
 		});
 
 		it("provides toggle options when typing widget or footer", () => {
@@ -452,9 +536,61 @@ describe("codex-auth extension", () => {
 			expect(updatedSnap.tokens?.refresh_token).toBe("new-refresh-from-pi");
 		});
 
+		it("does not overwrite ~/.codex/auth.json when active Codex account belongs to another user", () => {
+			const activeCodexAuth: CodexAuthFile = {
+				auth_mode: "chatgpt",
+				tokens: {
+					id_token: "id-active",
+					access_token: "active-codex-access",
+					refresh_token: "active-codex-refresh",
+					account_id: "active-account-id",
+				},
+				last_refresh: "2026-01-01T00:00:00.000Z",
+			};
+			writeFileSync(join(codexHome, "auth.json"), JSON.stringify(activeCodexAuth, null, 2));
+
+			const otherAccountKey = "user-other::other-account-id";
+			const fileKey = Buffer.from(otherAccountKey).toString("base64url");
+			const otherSnapshotPath = join(codexHome, "accounts", `${fileKey}.auth.json`);
+			writeFileSync(otherSnapshotPath, JSON.stringify({
+				auth_mode: "chatgpt",
+				tokens: {
+					id_token: "id-other",
+					access_token: "old-other-access",
+					refresh_token: "old-other-refresh",
+					account_id: "other-account-id",
+				},
+			}, null, 2));
+
+			// Pi has credentials for other-account-id
+			const piAuth: PiAuthStore = {
+				"openai-codex": {
+					type: "oauth",
+					access: "refreshed-other-access",
+					refresh: "refreshed-other-refresh",
+					expires: Date.now() + 10 * 86400 * 1000,
+					accountId: "other-account-id",
+				},
+			};
+			writeFileSync(join(piHome, "auth.json"), JSON.stringify(piAuth, null, 2));
+
+			const res = syncPiToCodex();
+			expect(res.changed).toBe(true);
+
+			// ~/.codex/auth.json MUST remain untouched (active-account-id)
+			const codexAuthAfter: CodexAuthFile = JSON.parse(readFileSync(join(codexHome, "auth.json"), "utf8"));
+			expect(codexAuthAfter.tokens?.account_id).toBe("active-account-id");
+			expect(codexAuthAfter.tokens?.access_token).toBe("active-codex-access");
+
+			// But other account's snapshot file MUST be updated
+			const otherSnapAfter: CodexAuthFile = JSON.parse(readFileSync(otherSnapshotPath, "utf8"));
+			expect(otherSnapAfter.tokens?.access_token).toBe("refreshed-other-access");
+			expect(otherSnapAfter.tokens?.refresh_token).toBe("refreshed-other-refresh");
+		});
+
 		it("formats /codex-auth status lines with remaining percentages (100% when unused, 0% when depleted)", async () => {
 			const mockRegistry: CodexRegistry = {
-				schema_version: 3,
+				schema_version: 4,
 				active_account_key: "acc-1",
 				accounts: [
 					{
@@ -466,6 +602,8 @@ describe("codex-auth extension", () => {
 						last_usage: {
 							primary: { used_percent: 0, window_minutes: 300, resets_at: Math.floor(Date.now() / 1000) + 3600 },
 							secondary: { used_percent: 100, window_minutes: 10080, resets_at: Math.floor(Date.now() / 1000) + 86400 },
+							reset_credits: 3,
+							credits: { has_credits: true, unlimited: false, balance: "15" },
 						},
 					},
 				],
@@ -485,6 +623,453 @@ describe("codex-auth extension", () => {
 			const output = (mockCtx.ui.notify as any).mock.calls[0][0];
 			expect(output).toContain("5h:     [██████████] 100%");
 			expect(output).toContain("Weekly: [░░░░░░░░░░] 0%");
+			expect(output).toContain("Credits: Balance: $15 • Reset Credits: 3");
+		});
+
+		it("does not update ~/.codex/auth.json when registry says account B is active even if auth.json and Pi match account A", () => {
+			// Scenario: Contaminated state where registry has active account B (id-2),
+			// but auth.json and Pi both currently have account A (id-1).
+			// Pi sync MUST NOT write account A back into auth.json, which would perpetuate the contamination.
+			const mockRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-2",
+				accounts: [
+					{ account_key: "acc-1", alias: "work", email: "work@example.com", chatgpt_account_id: "id-1" },
+					{ account_key: "acc-2", alias: "personal", email: "personal@example.com", chatgpt_account_id: "id-2" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			const authA: CodexAuthFile = {
+				auth_mode: "chatgpt",
+				tokens: { access_token: "old-a", refresh_token: "ref-a", account_id: "id-1" },
+			};
+			writeFileSync(join(codexHome, "auth.json"), JSON.stringify(authA, null, 2));
+
+			// Pi has new refreshed tokens for id-1 (account A)
+			const piAuth: PiAuthStore = {
+				"openai-codex": {
+					type: "oauth",
+					access: "new-a-from-pi",
+					refresh: "new-ref-a",
+					expires: Date.now() + 10 * 86400 * 1000,
+					accountId: "id-1",
+				},
+			};
+			writeFileSync(join(piHome, "auth.json"), JSON.stringify(piAuth, null, 2));
+
+			const res = syncPiToCodex();
+			// auth.json was NOT updated with new token because registry active is id-2 (acc-2)
+			const authAfter: CodexAuthFile = JSON.parse(readFileSync(join(codexHome, "auth.json"), "utf8"));
+			expect(authAfter.tokens?.access_token).toBe("old-a");
+		});
+
+		it("switches account using deterministic v0.3.0 CLI switched_to JSON response", () => {
+			const mockRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-1",
+				accounts: [
+					{ account_key: "acc-1", alias: "work", email: "work@example.com", chatgpt_account_id: "id-1" },
+					{ account_key: "acc-2", alias: "personal", email: "personal@example.com", chatgpt_account_id: "id-2" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			const v030Response = JSON.stringify({
+				schema_version: 1,
+				command: "switch",
+				switched_to: {
+					number: 2,
+					account_key: "acc-2",
+					email: "personal@example.com",
+					alias: "personal",
+					plan: "pro",
+					auth_mode: "chatgpt",
+					active: true,
+				},
+			});
+
+			const calls: Array<{ cmd: string; args: string[] }> = [];
+			setCommandExecutor((cmd, args) => {
+				calls.push({ cmd, args });
+				return v030Response;
+			});
+
+			const res = switchActiveAccount("personal");
+			expect(calls[0]).toEqual({
+				cmd: "codex-auth",
+				args: ["switch", "personal", "--json"],
+			});
+			expect(res.success).toBe(true);
+			expect(res.account?.account_key).toBe("acc-2");
+			expect(res.message).toContain("personal");
+
+			resetCommandExecutor();
+		});
+
+		it("returns structured CLI error and does not fall back when CLI reports ambiguous_query", () => {
+			const mockRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-1",
+				accounts: [
+					{ account_key: "acc-1", alias: "work-one", email: "work1@example.com", chatgpt_account_id: "id-1" },
+					{ account_key: "acc-2", alias: "work-two", email: "work2@example.com", chatgpt_account_id: "id-2" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			// CLI fails with ambiguous query error document
+			const cliError: any = new Error("Command failed");
+			cliError.status = 1;
+			cliError.stdout = JSON.stringify({
+				schema_version: 1,
+				error: {
+					code: "ambiguous_query",
+					message: "multiple accounts match \"work\"",
+				},
+			});
+
+			setCommandExecutor(() => {
+				throw cliError;
+			});
+
+			const res = switchActiveAccount("work");
+			// Must return the exact CLI error and NOT fall through to fallback (which would pick acc-1!)
+			expect(res.success).toBe(false);
+			expect(res.message).toBe("multiple accounts match \"work\"");
+
+			resetCommandExecutor();
+		});
+
+		it("invokes codex-auth switch - without --json for previous account shortcut", () => {
+			const mockRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-1",
+				previous_active_account_key: "acc-2",
+				accounts: [
+					{ account_key: "acc-1", alias: "work", email: "work@example.com", chatgpt_account_id: "id-1" },
+					{ account_key: "acc-2", alias: "personal", email: "personal@example.com", chatgpt_account_id: "id-2" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			const calls: Array<{ cmd: string; args: string[] }> = [];
+			setCommandExecutor((cmd, args) => {
+				calls.push({ cmd, args });
+				if (args && args[0] === "switch" && args[1] === "-") {
+					// Simulate CLI switching active_account_key to acc-2
+					const updated = { ...mockRegistry, active_account_key: "acc-2", previous_active_account_key: "acc-1" };
+					writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(updated, null, 2));
+					return Buffer.from("Switched to personal(personal@example.com)\n");
+				}
+				throw new Error("unexpected call");
+			});
+
+			const res = switchActiveAccount("-");
+			expect(calls[0]).toEqual({
+				cmd: "codex-auth",
+				args: ["switch", "-"],
+			});
+			expect(res.success).toBe(true);
+			expect(res.account?.account_key).toBe("acc-2");
+
+			resetCommandExecutor();
+		});
+
+		it("switches account using direct fallback when codex-auth is not installed (ENOENT)", () => {
+			const snap1Key = Buffer.from("acc-1").toString("base64url");
+			const snap2Key = Buffer.from("acc-2").toString("base64url");
+
+			const snap1: CodexAuthFile = {
+				auth_mode: "chatgpt",
+				tokens: { access_token: "t1", refresh_token: "r1", account_id: "id-1" },
+			};
+			const snap2: CodexAuthFile = {
+				auth_mode: "chatgpt",
+				tokens: { access_token: "t2", refresh_token: "r2", account_id: "id-2" },
+			};
+			writeFileSync(join(codexHome, "accounts", `${snap1Key}.auth.json`), JSON.stringify(snap1, null, 2));
+			writeFileSync(join(codexHome, "accounts", `${snap2Key}.auth.json`), JSON.stringify(snap2, null, 2));
+			writeFileSync(join(codexHome, "auth.json"), JSON.stringify(snap1, null, 2));
+
+			const mockRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-1",
+				previous_active_account_key: null,
+				accounts: [
+					{ account_key: "acc-1", alias: "work", email: "work@example.com", chatgpt_account_id: "id-1" },
+					{ account_key: "acc-2", alias: "personal", email: "personal@example.com", chatgpt_account_id: "id-2" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			// Mock ENOENT: codex-auth CLI binary does not exist on PATH
+			const enoentError: any = new Error("spawnSync codex-auth ENOENT");
+			enoentError.code = "ENOENT";
+			setCommandExecutor(() => {
+				throw enoentError;
+			});
+
+			// Switch to personal by alias via fallback
+			const res = switchActiveAccount("personal");
+			expect(res.success).toBe(true);
+
+			const regAfter: CodexRegistry = JSON.parse(readFileSync(join(codexHome, "accounts", "registry.json"), "utf8"));
+			expect(regAfter.active_account_key).toBe("acc-2");
+			expect(regAfter.previous_active_account_key).toBe("acc-1");
+
+			// Switch back to previous account using "-" via fallback
+			const resPrev = switchActiveAccount("-");
+			expect(resPrev.success).toBe(true);
+
+			const regAfterPrev: CodexRegistry = JSON.parse(readFileSync(join(codexHome, "accounts", "registry.json"), "utf8"));
+			expect(regAfterPrev.active_account_key).toBe("acc-1");
+			expect(regAfterPrev.previous_active_account_key).toBe("acc-2");
+
+			resetCommandExecutor();
+		});
+
+		it("formats autocomplete suggestions using account_name or masked ID when email is absent", () => {
+			const cmd = registeredCommands.get("codex-auth");
+			const mockRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-no-email",
+				previous_active_account_key: "acc-no-email-2",
+				accounts: [
+					{
+						account_key: "acc-no-email",
+						account_name: "Corporate Org",
+						chatgpt_account_id: "e2774859-949b-4f76-8c93-298e1260ea4e",
+						plan: "enterprise",
+					},
+					{
+						account_key: "acc-no-email-2",
+						chatgpt_account_id: "45f10ca5-0ddf-4fe1-9fb9-f571e8deef0a",
+						plan: "pro",
+					},
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			const completions = cmd.getArgumentCompletions("");
+			expect(completions).toBeInstanceOf(Array);
+
+			const prevItem = completions.find((c: any) => c.value === "-");
+			expect(prevItem).toBeDefined();
+			expect(prevItem.description).toContain("45f10ca5...");
+
+			const directItem = completions.find((c: any) => c.value === "Corporate Org");
+			expect(directItem).toBeDefined();
+			expect(directItem.label).toBe("Corporate Org");
+			expect(directItem.description).toContain("Corporate Org (ENTERPRISE)");
+
+			const switchCompletions = cmd.getArgumentCompletions("switch ");
+			const switchDirectItem = switchCompletions.find((c: any) => c.value === "switch Corporate Org");
+			expect(switchDirectItem).toBeDefined();
+			expect(switchDirectItem.label).toBe("switch Corporate Org");
+		});
+
+		it("rejects ambiguous selectors in fallback when codex-auth is not installed (ENOENT)", () => {
+			const mockRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-1",
+				accounts: [
+					{ account_key: "acc-1", email: "work-one@example.com", chatgpt_account_id: "id-1" },
+					{ account_key: "acc-2", email: "work-two@example.com", chatgpt_account_id: "id-2" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			// Mock ENOENT: CLI not installed
+			const enoentError: any = new Error("spawnSync codex-auth ENOENT");
+			enoentError.code = "ENOENT";
+			setCommandExecutor(() => {
+				throw enoentError;
+			});
+
+			const res = switchActiveAccount("work");
+			expect(res.success).toBe(false);
+			expect(res.message).toBe("multiple accounts match \"work\"");
+
+			resetCommandExecutor();
+		});
+
+		it("fails closed during sync when registry declares an active key that cannot be identified", () => {
+			// Registry declares active key "acc-ghost" that does not exist in accounts array
+			const mockRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-ghost",
+				accounts: [
+					{ account_key: "acc-1", email: "work@example.com", chatgpt_account_id: "id-1" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(mockRegistry, null, 2));
+
+			const authA: CodexAuthFile = {
+				auth_mode: "chatgpt",
+				tokens: { access_token: "old-a", refresh_token: "ref-a", account_id: "id-1" },
+			};
+			writeFileSync(join(codexHome, "auth.json"), JSON.stringify(authA, null, 2));
+
+			const piAuth: PiAuthStore = {
+				"openai-codex": {
+					type: "oauth",
+					access: "new-a",
+					refresh: "new-ref-a",
+					expires: Date.now() + 10 * 86400 * 1000,
+					accountId: "id-1",
+				},
+			};
+			writeFileSync(join(piHome, "auth.json"), JSON.stringify(piAuth, null, 2));
+
+			syncPiToCodex();
+			// Since active_account_key could not be identified, fail closed: auth.json must NOT be updated
+			const authAfter: CodexAuthFile = JSON.parse(readFileSync(join(codexHome, "auth.json"), "utf8"));
+			expect(authAfter.tokens?.access_token).toBe("old-a");
+		});
+
+		it("resolves display numbers using v0.3 display order on unsorted registries", () => {
+			// Registry accounts are intentionally stored in reverse/unsorted order
+			const unsortedRegistry: CodexRegistry = {
+				schema_version: 4,
+				active_account_key: "acc-z",
+				accounts: [
+					{ account_key: "acc-z", email: "zeta@example.com", alias: "zeta", plan: "plus" },
+					{ account_key: "acc-a", email: "alpha@example.com", alias: "alpha", plan: "plus" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(unsortedRegistry, null, 2));
+
+			// Display order should sort alpha@ before zeta@
+			const ordered = getDisplayOrderedAccounts(unsortedRegistry);
+			expect(ordered[0]?.account_key).toBe("acc-a");
+			expect(ordered[1]?.account_key).toBe("acc-z");
+
+			// "1" must resolve to alpha@ (row 1 in display), "2" to zeta@
+			expect(resolveAccount(unsortedRegistry, "1").status).toBe("found");
+			expect(resolveAccount(unsortedRegistry, "1")).toEqual({
+				status: "found",
+				account: expect.objectContaining({ account_key: "acc-a" }),
+			});
+			expect(resolveAccount(unsortedRegistry, "2")).toEqual({
+				status: "found",
+				account: expect.objectContaining({ account_key: "acc-z" }),
+			});
+		});
+
+		it("treats exact alias as ambiguous when another alias or fragment contains it (upstream query semantics)", () => {
+			const ambiguousAliasRegistry: CodexRegistry = {
+				schema_version: 4,
+				accounts: [
+					{ account_key: "acc-1", email: "dev1@example.com", alias: "work" },
+					{ account_key: "acc-2", email: "dev2@example.com", alias: "work-two" },
+				],
+			};
+			writeFileSync(join(codexHome, "accounts", "registry.json"), JSON.stringify(ambiguousAliasRegistry, null, 2));
+
+			// Query "work" matches both "work" and "work-two", so it must be ambiguous
+			const resAmbiguous = resolveAccount(ambiguousAliasRegistry, "work");
+			expect(resAmbiguous.status).toBe("ambiguous");
+			if (resAmbiguous.status === "ambiguous") {
+				expect(resAmbiguous.candidates).toHaveLength(2);
+			}
+
+			// Query "work-two" matches only acc-2, so it must resolve directly
+			const resDirect = resolveAccount(ambiguousAliasRegistry, "work-two");
+			expect(resDirect.status).toBe("found");
+			if (resDirect.status === "found") {
+				expect(resDirect.account.account_key).toBe("acc-2");
+			}
+		});
+
+		it("sorts same-email accounts preferring last_usage.plan_type over plan (resolveDisplayPlan)", () => {
+			// Both accounts share the same email "user@example.com".
+			// Account 1: plan says "plus" (individual rank 1), but last_usage.plan_type says "business" (rank 0).
+			// Account 2: plan says "pro" (individual rank 1), with no usage plan_type.
+			// Because last_usage.plan_type wins, Account 1 resolves as "business" (rank 0)
+			// and must sort before Account 2 (rank 1).
+			const sameEmailRegistry: CodexRegistry = {
+				schema_version: 4,
+				accounts: [
+					{
+						account_key: "acc-user-pro",
+						email: "user@example.com",
+						plan: "pro",
+					},
+					{
+						account_key: "acc-user-team",
+						email: "user@example.com",
+						plan: "plus",
+						last_usage: {
+							plan_type: "business",
+						},
+					},
+				],
+			};
+
+			const ordered = getDisplayOrderedAccounts(sameEmailRegistry);
+			expect(ordered[0]?.account_key).toBe("acc-user-team");
+			expect(ordered[1]?.account_key).toBe("acc-user-pro");
+
+			// "1" must resolve to acc-user-team
+			expect(resolveAccount(sameEmailRegistry, "1")).toEqual({
+				status: "found",
+				account: expect.objectContaining({ account_key: "acc-user-team" }),
+			});
+		});
+
+		it("sorts same-email Business and Enterprise accounts with reversed account keys", () => {
+			// In Schema 4, "business" preserves as Business, "enterprise" as Enterprise.
+			// Display labels: "BUSINESS" vs "ENTERPRISE". "BUSINESS" < "ENTERPRISE" alphabetically.
+			// Account acc-z-biz has a lexicographically later account key than acc-a-ent ("acc-z-biz" > "acc-a-ent").
+			// Upstream must sort Business before Enterprise regardless of account key order.
+			const bizEntRegistry: CodexRegistry = {
+				schema_version: 4,
+				accounts: [
+					{
+						account_key: "acc-a-ent",
+						email: "corp@example.com",
+						plan: "enterprise",
+					},
+					{
+						account_key: "acc-z-biz",
+						email: "corp@example.com",
+						plan: "business",
+					},
+				],
+			};
+
+			const ordered = getDisplayOrderedAccounts(bizEntRegistry);
+			expect(ordered[0]?.account_key).toBe("acc-z-biz");
+			expect(ordered[1]?.account_key).toBe("acc-a-ent");
+
+			expect(resolveAccount(bizEntRegistry, "1")).toEqual({
+				status: "found",
+				account: expect.objectContaining({ account_key: "acc-z-biz" }),
+			});
+		});
+
+		it("sorts same-email API key accounts using display label API_KEY", () => {
+			const apiKeyRegistry: CodexRegistry = {
+				schema_version: 4,
+				accounts: [
+					{
+						account_key: "apikey::org::123456789",
+						email: "same@example.com",
+						auth_mode: "apikey",
+					},
+					{
+						account_key: "oauth::user::123456789",
+						email: "same@example.com",
+						plan: "business",
+					},
+				],
+			};
+
+			const ordered = getDisplayOrderedAccounts(apiKeyRegistry);
+			// business (rank 0) sorts before API_KEY (unknown plan rank 2)
+			expect(ordered[0]?.account_key).toBe("oauth::user::123456789");
+			expect(ordered[1]?.account_key).toBe("apikey::org::123456789");
 		});
 	});
 });

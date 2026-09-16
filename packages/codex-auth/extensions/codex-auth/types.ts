@@ -11,34 +11,42 @@ export interface CodexUsageWindow {
 export interface CodexCredits {
 	has_credits: boolean;
 	unlimited: boolean;
-	balance: string;
+	balance: string | null;
 }
 
 export interface CodexAccountUsage {
-	primary?: CodexUsageWindow;
-	secondary?: CodexUsageWindow;
-	credits?: CodexCredits;
-	plan_type?: string;
+	primary?: CodexUsageWindow | null;
+	secondary?: CodexUsageWindow | null;
+	credits?: CodexCredits | null;
+	reset_credits?: number | null;
+	plan_type?: string | null;
+	source?: "api" | "local" | "cache" | "none" | string;
+	updated_at?: number;
 }
 
 export interface CodexAccount {
+	number?: number;
 	account_key: string;
 	chatgpt_account_id?: string;
 	chatgpt_user_id?: string;
 	email?: string;
-	alias?: string;
+	alias?: string | null;
 	account_name?: string | null;
 	plan?: string;
 	auth_mode?: string;
+	active?: boolean;
 	created_at?: number;
 	last_used_at?: number;
 	last_usage?: CodexAccountUsage;
+	usage?: CodexAccountUsage;
 	last_usage_at?: number;
 }
 
 export interface CodexRegistry {
 	schema_version: number;
 	active_account_key?: string;
+	previous_active_account_key?: string | null;
+	interval_seconds?: number;
 	active_account_activated_at_ms?: number;
 	accounts: CodexAccount[];
 }

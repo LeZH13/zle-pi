@@ -49,11 +49,16 @@ pi install /path/to/zle-pi/packages/codex-auth
 ## Features
 
 * **Interactive Switcher:** Run `/codex-auth` in interactive mode to pick and switch between accounts using a clean TUI selector.
-* **Full Autocomplete:** Rich tab-completion for `/codex-auth` subcommands, toggles, and registered account aliases.
+* **codex-auth v0.3.0 & Schema 4 Ready:** Full support for `codex-auth v0.3.0`, `schema_version: 4`, product-level plan naming (`business`, `enterprise`), and new JSON API contracts.
+* **Previous Account Shortcut (`-`):** Jump back and forth between previous accounts with `/codex-auth -` or `/codex-auth switch -`.
+* **Flexible Selectors:** Switch by friendly alias, email substring, display row number (e.g. `/codex-auth 1`), or account name.
+* **Quota & Credits Monitoring:** Displays 5h and weekly quota percentages, reset countdowns, credit balances, and reset credits in status views and picker dialogs.
+* **Full Autocomplete:** Rich tab-completion for `/codex-auth` subcommands (`switch`, `list`, `alias`, `sync`, `widget`, `footer`), previous shortcut (`-`), and registered accounts.
+* **Alias Management:** Set or clear aliases directly from Pi via `/codex-auth alias set <query> <alias>` and `/codex-auth alias clear <query>`.
 * **Pi Footer Status Badge:** Displays a compact status badge (`codex: work (plus)`) directly in Pi's footer.
 * **Dedicated Quota Widget:** Renders a subtle 2nd-line bar below the editor showing remaining 5-hour and weekly rate limits (100% when unused, 0% when depleted, consistent with `codex-auth`) with faint hairline separation.
 * **Live File Watcher:** Automatically detects external `codex-auth switch` calls from other terminals and updates Pi immediately.
-* **Bi-directional Refresh Write-back:** When Pi refreshes an expired OAuth token, the new tokens are written back to `~/.codex/auth.json` and its snapshots so external CLI tools never break.
+* **Safe Bi-directional Token Sync:** When Pi refreshes an expired OAuth token, the new tokens are written back to the account's managed snapshot and active auth without cross-account contamination.
 * **Strict Secret Redaction:** All tokens, refresh tokens, and private account IDs are completely protected and masked in logs/UI.
 * **Persistent Display Preferences:** Toggle settings (`/codex-auth widget on|off` and `/codex-auth footer on|off`) are automatically saved to `~/.pi/agent/codex-auth.json` and persist across sessions.
 
@@ -64,9 +69,12 @@ pi install /path/to/zle-pi/packages/codex-auth
 | Command | Description |
 | :--- | :--- |
 | `/codex-auth` | Open the interactive TUI account picker dialog |
-| `/codex-auth switch <alias>` | Switch directly to an account by alias, masked email, or key |
-| `/codex-auth <alias>` | Shortcut to switch directly to an account |
-| `/codex-auth status` | Show all registered accounts and remaining 5h / weekly quota reset countdowns |
+| `/codex-auth -` | Jump directly back to the previously active account |
+| `/codex-auth switch <query>` | Switch directly by alias, email fragment, row number (`1`), account name, or `-` |
+| `/codex-auth <query>` | Shortcut to switch directly to an account or previous (`-`) |
+| `/codex-auth list` / `/codex-auth status` | Show all registered accounts, 5h & weekly quotas, and credit balances |
+| `/codex-auth alias set <query> <alias>` | Set an alias for the matched account |
+| `/codex-auth alias clear <query>` | Clear an alias for the matched account |
 | `/codex-auth sync` | Manually force a bi-directional sync between `~/.codex` and Pi |
 | `/codex-auth widget on\|off` | Toggle the quota progress line below the editor |
 | `/codex-auth footer on\|off` | Toggle the footer status badge |
