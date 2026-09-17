@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-codex-auth",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "OpenAI Codex multi-account switcher and quota monitor extension for Pi Coding Agent",
   "type": "module",
   "keywords": [
@@ -38,6 +38,7 @@
   },
   "scripts": {
     "test": "vitest --run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test"
   }
 }

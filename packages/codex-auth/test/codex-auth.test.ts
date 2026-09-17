@@ -41,6 +41,7 @@ describe("codex-auth extension", () => {
 		registeredListeners = new Map();
 
 		mockPi = {
+			exec: vi.fn().mockResolvedValue({ code: 0, killed: false, stdout: "{}", stderr: "" }),
 			registerCommand: vi.fn((name, options) => {
 				registeredCommands.set(name, options);
 			}),
@@ -67,6 +68,41 @@ describe("codex-auth extension", () => {
 		expect(mockPi.on).toHaveBeenCalledWith("session_start", expect.any(Function));
 		expect(mockPi.on).toHaveBeenCalledWith("after_provider_response", expect.any(Function));
 		expect(mockPi.on).toHaveBeenCalledWith("session_shutdown", expect.any(Function));
+	});
+
+	it("refreshes the active account on demand through codex-auth's API-backed command", async () => {
+		const cmd = registeredCommands.get("codex-auth");
+		const ctx = {
+			hasUI: true,
+			ui: { notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() },
+		} as unknown as ExtensionCommandContext;
+
+		await cmd.handler("refresh", ctx);
+
+		expect(mockPi.exec).toHaveBeenCalledWith(
+			"codex-auth",
+			["list", "--active", "--json"],
+			expect.objectContaining({ timeout: 15_000 }),
+		);
+		expect(ctx.ui.notify).toHaveBeenCalledWith("Refreshed active Codex usage.", "info");
+	});
+
+	it("throttles automatic usage refreshes and limits them to Codex provider responses", async () => {
+		const handler = registeredListeners.get("after_provider_response");
+		const ctx = {
+			model: { provider: "openai-codex" },
+			ui: { notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() },
+		} as any;
+
+		await handler({}, ctx);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		await handler({}, ctx);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(mockPi.exec).toHaveBeenCalledTimes(1);
+
+		await handler({}, { ...ctx, model: { provider: "anthropic" } });
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(mockPi.exec).toHaveBeenCalledTimes(1);
 	});
 
 	describe("masking & formatting helpers", () => {

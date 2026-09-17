@@ -35,12 +35,57 @@ import {
 	refreshUI,
 } from "./ui.js";
 
+const USAGE_REFRESH_TTL_MS = 90_000;
+const USAGE_REFRESH_TIMEOUT_MS = 15_000;
+
 export default function codexAuthExtension(pi: ExtensionAPI) {
 	// Extension display configuration (persisted across sessions in ~/.pi/agent/codex-auth.json)
 	const config: CodexAuthConfig = loadConfig();
 
 	let disposeWatcher: (() => void) | null = null;
 	let lastContext: ExtensionContext | null = null;
+	let lastUsageRefreshAttemptAt = 0;
+	let usageRefreshInFlight: Promise<boolean> | null = null;
+	let usageRefreshController: AbortController | null = null;
+
+	/**
+	 * Refresh the active account's quota through codex-auth's API-backed command.
+	 * Concurrent and non-forced refreshes are coalesced and throttled so Pi does
+	 * not turn each model response into a separate usage API request.
+	 */
+	async function refreshActiveUsage(ctx: ExtensionContext, force = false): Promise<boolean> {
+		if (usageRefreshInFlight) return usageRefreshInFlight;
+		if (!force && Date.now() - lastUsageRefreshAttemptAt < USAGE_REFRESH_TTL_MS) return false;
+
+		lastUsageRefreshAttemptAt = Date.now();
+		usageRefreshController = new AbortController();
+		const signal = ctx.signal
+			? AbortSignal.any([ctx.signal, usageRefreshController.signal])
+			: usageRefreshController.signal;
+
+		usageRefreshInFlight = (async () => {
+			try {
+				const result = await pi.exec("codex-auth", ["list", "--active", "--json"], {
+					signal,
+					timeout: USAGE_REFRESH_TIMEOUT_MS,
+				});
+				if (result.code !== 0 || result.killed) return false;
+
+				// codex-auth persists its refreshed usage to registry.json. Read it
+				// again rather than trusting its output so UI remains registry-backed.
+				if (!signal.aborted && lastContext === ctx) refreshUI(ctx, config);
+				return true;
+			} catch {
+				// A stale cached quota is preferable to interrupting Pi for a monitor failure.
+				return false;
+			} finally {
+				usageRefreshInFlight = null;
+				usageRefreshController = null;
+			}
+		})();
+
+		return usageRefreshInFlight;
+	}
 
 	// Internal helper to perform switch and update state
 	async function executeSwitch(selector: string, ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
@@ -60,7 +105,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 
 	// Register /codex-auth slash command with rich autocomplete
 	pi.registerCommand("codex-auth", {
-		description: "OpenAI Codex account switcher & quota monitor (/codex-auth [switch|list|status|alias|sync|widget|footer])",
+		description: "OpenAI Codex account switcher & quota monitor (/codex-auth [switch|list|status|alias|sync|refresh|widget|footer])",
 		getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
 			const normPrefix = prefix.trimStart().toLowerCase();
 			const registry = loadRegistry();
@@ -76,6 +121,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				{ value: "status", label: "status", description: "Show registered accounts and rate limits" },
 				{ value: "alias", label: "alias", description: "Manage account alias (set|clear)" },
 				{ value: "sync", label: "sync", description: "Force bi-directional token sync" },
+				{ value: "refresh", label: "refresh", description: "Refresh active account quota from OpenAI" },
 				{ value: "widget", label: "widget", description: "Toggle 2nd-line widget below editor" },
 				{ value: "footer", label: "footer", description: "Toggle footer status badge" },
 			];
@@ -201,7 +247,17 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// 3. /codex-auth sync
+			// 3. /codex-auth refresh
+			if (sub === "refresh") {
+				const refreshed = await refreshActiveUsage(ctx, true);
+				ctx.ui.notify(
+					refreshed ? "Refreshed active Codex usage." : "Could not refresh Codex usage; showing cached values.",
+					refreshed ? "info" : "warning",
+				);
+				return;
+			}
+
+			// 4. /codex-auth sync
 			if (sub === "sync") {
 				const toPi = syncCodexToPi();
 				const toCodex = syncPiToCodex();
@@ -215,7 +271,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// 4. /codex-auth status or /codex-auth list
+			// 5. /codex-auth status or /codex-auth list
 			if (sub === "status" || sub === "list") {
 				const registry = loadRegistry();
 				if (!registry || registry.accounts.length === 0) {
@@ -263,7 +319,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// 5. /codex-auth alias [set <query> <alias> | clear <query>]
+			// 6. /codex-auth alias [set <query> <alias> | clear <query>]
 			if (sub === "alias") {
 				const action = parts[1]?.toLowerCase();
 				if (action === "set") {
@@ -293,7 +349,7 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// 6. /codex-auth switch <query> (including /codex-auth switch -)
+			// 7. /codex-auth switch <query> (including /codex-auth switch -)
 			if (sub === "switch") {
 				const query = parts.slice(1).join(" ");
 				if (!query) {
@@ -308,19 +364,19 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// 7. /codex-auth - (jump to previous account)
+			// 8. /codex-auth - (jump to previous account)
 			if (trimmed === "-") {
 				await executeSwitch("-", ctx);
 				return;
 			}
 
-			// 8. Direct query (e.g. `/codex-auth work` or `/codex-auth 1`) or default interactive picker
+			// 9. Direct query (e.g. `/codex-auth work` or `/codex-auth 1`) or default interactive picker
 			if (trimmed) {
 				await executeSwitch(trimmed, ctx);
 			} else if (ctx.hasUI) {
 				await promptAccountPicker(ctx, (key) => executeSwitch(key, ctx));
 			} else {
-				ctx.ui.notify("Usage: /codex-auth [switch <query>|list|status|alias|sync|widget|footer|-]", "info");
+				ctx.ui.notify("Usage: /codex-auth [switch <query>|list|status|alias|sync|refresh|widget|footer|-]", "info");
 			}
 		},
 	});
@@ -348,19 +404,27 @@ export default function codexAuthExtension(pi: ExtensionAPI) {
 			});
 		}
 
-		// 3. Render UI status and widget
+		// 3. Render cached status immediately, then refresh quota in the background.
 		refreshUI(ctx, config);
+		void refreshActiveUsage(ctx);
 	});
 
-	// Model / Request lifecycle: Sync refreshed tokens back to ~/.codex
+	// Model / Request lifecycle: sync refreshed tokens and refresh Codex quota at most once per TTL.
 	pi.on("after_provider_response", async (_event, ctx) => {
 		lastContext = ctx;
 		syncPiToCodex();
 		refreshUI(ctx, config);
+
+		// This hook runs before Pi consumes the response stream, so do not await
+		// the monitor request and delay the model output.
+		if (ctx.model?.provider === "openai-codex") {
+			void refreshActiveUsage(ctx);
+		}
 	});
 
 	// Session Shutdown Lifecycle: Clean up watchers
 	pi.on("session_shutdown", async () => {
+		usageRefreshController?.abort();
 		if (disposeWatcher) {
 			disposeWatcher();
 			disposeWatcher = null;

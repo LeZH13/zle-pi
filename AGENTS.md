@@ -42,6 +42,7 @@ A package may contain one resource or a cohesive bundle. Its `package.json` must
 3. **Make the narrow change.** Preserve package boundaries and co-locate package-only helpers. Add or update tests for observable behavior. Completion: no unrelated package or shared abstraction changed without a demonstrated need.
 4. **Verify.** Run the narrowest relevant Vitest test first, then `npm test --workspace <package-name>` and the package/root checks declared by npm scripts. Exercise resource discovery or runtime behavior when static tests cannot prove it. Completion: all applicable checks pass; any unavailable check is named with the reason.
 5. **Document the surface.** Update the owning package README when installation, commands, tools, configuration, invocation, or user-visible behavior changes. Completion: a user can discover and use the changed surface without reading its implementation.
+6. **Publish and catalog.** Tag `keywords` with `"pi-package"` in `package.json` for pi.dev/packages discovery, add optional `pi.image`/`pi.video` preview media, and publish publicly (`--access public` for scoped). Completion: the package carries the `"pi-package"` keyword and is publicly released for catalog indexing.
 
 ## Resource contracts
 
