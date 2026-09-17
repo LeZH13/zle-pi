@@ -23,6 +23,7 @@ import type { CodexAuthFile, CodexRegistry, PiAuthStore } from "../extensions/co
 import {
 	buildWidgetLine,
 	calculateRemainingPercent,
+	formatFooterStatus,
 	formatProgressBar,
 	formatResetTime,
 	getActiveAccount,
@@ -123,6 +124,35 @@ describe("codex-auth extension", () => {
 			expect(formatResetTime(now + 3600 + 1200)).toBe("in 1h 20m");
 			expect(formatResetTime(now - 10)).toBe("now");
 			expect(formatResetTime(undefined)).toBe("");
+		});
+
+		it("formats compact footer status with account number and 5h/7d usage limits", () => {
+			const mockRegistry: any = {
+				schema_version: 1,
+				accounts: [
+					{
+						account_key: "acc-1",
+						email: "alice@example.com",
+						usage: {
+							primary: { used_percent: 5 },
+							secondary: { used_percent: 1 },
+						},
+					},
+					{
+						account_key: "acc-2",
+						email: "bob@example.com",
+					},
+				],
+			};
+
+			// Account 1 with full usage (5% used -> 95% remaining; 1% used -> 99% remaining)
+			expect(formatFooterStatus(mockRegistry, mockRegistry.accounts[0])).toBe("codex #1 · 5h 95% · 7d 99%");
+
+			// Account 2 without usage yet
+			expect(formatFooterStatus(mockRegistry, mockRegistry.accounts[1])).toBe("codex #2");
+
+			// No active account
+			expect(formatFooterStatus(mockRegistry, null)).toBe("codex: none");
 		});
 	});
 

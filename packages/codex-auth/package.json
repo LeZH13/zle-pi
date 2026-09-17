@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-codex-auth",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenAI Codex multi-account switcher and quota monitor extension for Pi Coding Agent",
   "type": "module",
   "keywords": [
@@ -14,7 +14,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LeZH13/zle-pi.git",
+    "url": "git+https://github.com/LeZH13/zle-pi.git",
     "directory": "packages/codex-auth"
   },
   "files": [

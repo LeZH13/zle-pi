@@ -131,6 +131,37 @@ export function buildWidgetLine(
 	return truncateToWidth(shortest, width, "…");
 }
 
+/** Format compact footer status badge: e.g. "codex #1 · 5h 95% · 7d 99%" */
+export function formatFooterStatus(registry: CodexRegistry | null, active: CodexAccount | null): string {
+	if (!active) return "codex: none";
+	const ordered = registry ? getDisplayOrderedAccounts(registry) : [];
+	const index = ordered.findIndex((a) => a.account_key === active.account_key);
+	const accNumber = index >= 0 ? `#${index + 1}` : (active.number ? `#${active.number}` : "");
+	const label = accNumber ? `codex ${accNumber}` : `codex: ${formatAccountIdentifier(active)}`;
+
+	const usage = active.usage ?? active.last_usage;
+	const parts: string[] = [label];
+	if (typeof usage?.primary?.used_percent === "number") {
+		const u5h = calculateRemainingPercent(usage.primary.used_percent);
+		parts.push(`5h ${u5h}%`);
+	}
+	if (typeof usage?.secondary?.used_percent === "number") {
+		const u7d = calculateRemainingPercent(usage.secondary.used_percent);
+		parts.push(`7d ${u7d}%`);
+	}
+	return parts.join(" · ");
+}
+
+export const CODEX_FOOTER_COLOR = "#b5bd68";
+
+export function hexColor(hex: string, text: string): string {
+	const clean = hex.replace("#", "");
+	const r = Number.parseInt(clean.slice(0, 2), 16);
+	const g = Number.parseInt(clean.slice(2, 4), 16);
+	const b = Number.parseInt(clean.slice(4, 6), 16);
+	return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
+}
+
 /** Update Pi footer status badge & 2nd line widget */
 export function refreshUI(ctx: ExtensionContext, config: CodexAuthConfig): void {
 	if (!ctx.hasUI) return;
@@ -140,13 +171,8 @@ export function refreshUI(ctx: ExtensionContext, config: CodexAuthConfig): void 
 
 	// 1. Pi Footer Status Badge (Compact & Dimmed)
 	if (config.footerEnabled) {
-		if (active) {
-			const label = formatAccountIdentifier(active);
-			const plan = active.plan ? ` (${active.plan.toLowerCase()})` : "";
-			ctx.ui.setStatus("codex-auth", `codex: ${label}${plan}`);
-		} else {
-			ctx.ui.setStatus("codex-auth", "codex: none");
-		}
+		const raw = formatFooterStatus(registry, active);
+		ctx.ui.setStatus("codex-auth", raw ? hexColor(CODEX_FOOTER_COLOR, raw) : undefined);
 	} else {
 		ctx.ui.setStatus("codex-auth", undefined);
 	}
