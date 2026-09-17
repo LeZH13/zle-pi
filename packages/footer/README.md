@@ -32,7 +32,7 @@ Renders a terminal prompt-like Line 1 styled after Starship and Zentui:
 
 ```text
 zle-pi on  main [!?] +1527 -693 via ⬡ v26.7.0         codex #1 · 5h 95% · 7d 99%
-↑ 263.9k ↓ 29.0k · ↺ 98.9% ·  34.3 t/s · $ 6.406 · ◔ 49.7%    gpt-5.6-sol • high
+↑ 263.9k ↓ 29.0k · ↺ 98.9% ·  34.3 t/s · $ 6.406 · ◔ 49.7%    openai/gpt-5.6-sol • high
 custom-extension-status                                                ◷ 16m 22s
 ```
 
@@ -49,7 +49,7 @@ Standard 3-line layout:
 
 ```text
 zle-pi ·  main [!1+2~1?3↑1]                           codex #1 · 5h 95% · 7d 99%
-↑ 263.9k ↓ 29.0k · ↺ 98.9% ·  34.3 t/s · $ 6.406 · ◔ 49.7%    gpt-5.6-sol • high
+↑ 263.9k ↓ 29.0k · ↺ 98.9% ·  34.3 t/s · $ 6.406 · ◔ 49.7%    openai/gpt-5.6-sol • high
 custom-extension-status                                                ◷ 16m 22s
 ```
 
@@ -74,8 +74,8 @@ custom-extension-status                                                ◷ 16m 2
   - ` <tps> t/s`: Average generation speed (tokens per second) across assistant turns in the user prompt using the Nerd Font bolt ``.
   - `$ <cost>`: Estimated cumulative session cost.
   - `◔ <context>%`: Context window utilization percentage.
-- **Right:** Active model ID and thinking level.
-  - Model name in dim text with bullet separator `•`.
+- **Right:** Active provider and model ID (e.g. `cliproxy/gemini...` or `openai/gpt-5.6-sol`) and thinking level.
+  - Model identifier in dim text with bullet separator `•`.
   - Thinking level styled following Pi's editor thinking colors (`theme.getThinkingBorderColor`):
     - `off`: `thinkingOff` (dark gray / light gray)
     - `minimal`: `thinkingMinimal` (subtle gray)

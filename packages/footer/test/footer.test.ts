@@ -21,6 +21,7 @@ import footerExtension, {
 	extractRuntimeVersion,
 	formatDuration,
 	formatGitMetrics,
+	formatModelIdentifier,
 	formatStarshipIdentity,
 	formatStarshipStatus,
 	formatThinkingLevel,
@@ -90,7 +91,7 @@ function setupFooter(
 			const context = {
 				mode: "tui",
 				cwd: "/mock-cwd",
-				model: { id: "gpt-5.6-sol" },
+				model: { id: "gpt-5.6-sol", provider: "openai" },
 				thinkingLevel: "high",
 				sessionManager: { getEntries: () => [] },
 				getContextUsage: () => ({ tokens: 10_000, contextWindow: 100_000, percent: 10.0 }),
@@ -163,6 +164,14 @@ describe("pi-footer extension", () => {
 			const colored = hexColor(CODEX_COLOR, "test");
 			expect(colored).toBe("\x1b[38;2;181;189;104mtest\x1b[39m");
 			expect(stripTerminalSequences(colored)).toBe("test");
+		});
+
+		it("formats model identifier with provider prefix when available", () => {
+			expect(formatModelIdentifier({ id: "gemini-2.5-pro", provider: "cliproxy" })).toBe("cliproxy/gemini-2.5-pro");
+			expect(formatModelIdentifier({ id: "gpt-5.6-sol", provider: "openai" })).toBe("openai/gpt-5.6-sol");
+			expect(formatModelIdentifier({ id: "cliproxy/gemini-2.5-pro", provider: "cliproxy" })).toBe("cliproxy/gemini-2.5-pro");
+			expect(formatModelIdentifier({ id: "gpt-5.6-sol" })).toBe("gpt-5.6-sol");
+			expect(formatModelIdentifier(undefined)).toBe("no-model");
 		});
 
 		it("formats thinking level using theme getThinkingBorderColor and fallbacks", () => {
@@ -284,7 +293,7 @@ describe("pi-footer extension", () => {
 			expect(line2).toContain("↑ 2.8k ↓ 450 · "); // No dot between input and output tokens
 			expect(line2).toContain("$ 0.100"); // 0.05 + 0.01 + 0.02 + 0.02
 			expect(line2).toContain("◔ 45.0%");
-			expect(line2).toContain("gpt-5.6-sol • high");
+			expect(line2).toContain("openai/gpt-5.6-sol • high");
 
 			// Line 3: external statuses on left, runtime on right
 			expect(line3).toContain("custom-status-text");

@@ -41,6 +41,14 @@ export function formatThinkingLevel(thinking: string, theme: ThemeLike): string 
 	return theme.fg(token, thinking);
 }
 
+export function formatModelIdentifier(model?: { id?: string; provider?: string }): string {
+	if (!model || !model.id) return "no-model";
+	if (model.provider && !model.id.startsWith(`${model.provider}/`)) {
+		return `${model.provider}/${model.id}`;
+	}
+	return model.id;
+}
+
 export const CODEX_STATUS_KEYS = ["codex-auth", "pi-multi-codex"] as const;
 export const CODEX_COLOR = "#b5bd68";
 export const AGENT_TIME_ENTRY = "pi-footer:agent-work";
@@ -853,7 +861,8 @@ export default function footerExtension(pi: ExtensionAPI): void {
 					);
 
 					const thinkingText = formatThinkingLevel(thinking, theme);
-					const model = theme.fg("dim", `${ctx.model?.id ?? "no-model"} • `) + thinkingText;
+					const modelStr = formatModelIdentifier(ctx.model);
+					const model = theme.fg("dim", `${modelStr} • `) + thinkingText;
 					const line2 = alignRightReserved(usage, model, width, ellipsis);
 
 					// Line 3: External Statuses & Active Agent Timer
