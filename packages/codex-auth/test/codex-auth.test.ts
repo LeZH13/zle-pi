@@ -162,7 +162,7 @@ describe("codex-auth extension", () => {
 			expect(formatResetTime(undefined)).toBe("");
 		});
 
-		it("formats compact footer status with account number and 5h/7d usage limits", () => {
+		it("formats compact footer status with account number or alias and 5h/7d usage limits", () => {
 			const mockRegistry: any = {
 				schema_version: 1,
 				accounts: [
@@ -178,14 +178,34 @@ describe("codex-auth extension", () => {
 						account_key: "acc-2",
 						email: "bob@example.com",
 					},
+					{
+						account_key: "acc-3",
+						alias: "work",
+						email: "work@example.com",
+						usage: {
+							primary: { used_percent: 10 },
+							secondary: { used_percent: 2 },
+						},
+					},
+					{
+						account_key: "acc-4",
+						alias: "personal",
+						email: "me@example.com",
+					},
 				],
 			};
 
-			// Account 1 with full usage (5% used -> 95% remaining; 1% used -> 99% remaining)
+			// Account 1 without alias: shows #1 with usage
 			expect(formatFooterStatus(mockRegistry, mockRegistry.accounts[0])).toBe("codex #1 · 5h 95% · 7d 99%");
 
-			// Account 2 without usage yet
+			// Account 2 without alias or usage: shows #2
 			expect(formatFooterStatus(mockRegistry, mockRegistry.accounts[1])).toBe("codex #2");
+
+			// Account 3 with alias: shows #alias replacing number with usage
+			expect(formatFooterStatus(mockRegistry, mockRegistry.accounts[2])).toBe("codex #work · 5h 90% · 7d 98%");
+
+			// Account 4 with alias and no usage yet: shows #alias
+			expect(formatFooterStatus(mockRegistry, mockRegistry.accounts[3])).toBe("codex #personal");
 
 			// No active account
 			expect(formatFooterStatus(mockRegistry, null)).toBe("codex: none");

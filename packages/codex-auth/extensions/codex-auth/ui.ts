@@ -131,13 +131,16 @@ export function buildWidgetLine(
 	return truncateToWidth(shortest, width, "…");
 }
 
-/** Format compact footer status badge: e.g. "codex #1 · 5h 95% · 7d 99%" */
+/** Format compact footer status badge: e.g. "codex #work · 5h 95% · 7d 99%" or "codex #1 · 5h 95% · 7d 99%" */
 export function formatFooterStatus(registry: CodexRegistry | null, active: CodexAccount | null): string {
 	if (!active) return "codex: none";
 	const ordered = registry ? getDisplayOrderedAccounts(registry) : [];
 	const index = ordered.findIndex((a) => a.account_key === active.account_key);
 	const accNumber = index >= 0 ? `#${index + 1}` : (active.number ? `#${active.number}` : "");
-	const label = accNumber ? `codex ${accNumber}` : `codex: ${formatAccountIdentifier(active)}`;
+	const rawAlias = active.alias?.trim();
+	const alias = rawAlias ? (rawAlias.startsWith("#") ? rawAlias : `#${rawAlias}`) : undefined;
+	const identifier = alias || accNumber;
+	const label = identifier ? `codex ${identifier}` : `codex: ${formatAccountIdentifier(active)}`;
 
 	const usage = active.usage ?? active.last_usage;
 	const parts: string[] = [label];

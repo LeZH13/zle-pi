@@ -55,7 +55,7 @@ pi install /path/to/zle-pi/packages/codex-auth
 * **Quota & Credits Monitoring:** Displays 5h and weekly quota percentages, reset countdowns, credit balances, and reset credits in status views and picker dialogs. It fetches the active account's live quota at session start and after Pi Codex responses no more than once per 90 seconds; use `/codex-auth refresh` for an immediate update.
 * **Full Autocomplete:** Rich tab-completion for `/codex-auth` subcommands (`switch`, `list`, `alias`, `sync`, `refresh`, `widget`, `footer`), previous shortcut (`-`), and registered accounts.
 * **Alias Management:** Set or clear aliases directly from Pi via `/codex-auth alias set <query> <alias>` and `/codex-auth alias clear <query>`.
-* **Pi Footer Status Badge:** Displays a compact status badge (`codex: work (plus)`) directly in Pi's footer.
+* **Pi Footer Status Badge:** Displays a compact status badge (e.g. `codex #work · 5h 95% · 7d 99%` or `codex #1 · 5h 95% · 7d 99%`) directly in Pi's footer.
 * **Dedicated Quota Widget:** Renders a subtle 2nd-line bar below the editor showing remaining 5-hour and weekly rate limits (100% when unused, 0% when depleted, consistent with `codex-auth`) with faint hairline separation.
 * **Live File Watcher:** Automatically detects external `codex-auth` registry and active-account changes from other terminals and updates Pi immediately.
 * **Safe Bi-directional Token Sync:** When Pi refreshes an expired OAuth token, the new tokens are written back to the account's managed snapshot and active auth without cross-account contamination.
