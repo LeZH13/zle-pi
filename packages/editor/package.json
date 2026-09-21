@@ -1,0 +1,43 @@
+{
+  "name": "@zle13/pi-editor",
+  "version": "0.1.0",
+  "description": "Show the explicit session name right-flush on the Pi input editor top border; unnamed sessions render the native border.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "editor",
+    "session"
+  ],
+  "author": "zle13",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeZH13/zle-pi.git",
+    "directory": "packages/editor"
+  },
+  "files": [
+    "extensions",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/editor.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run"
+  }
+}
