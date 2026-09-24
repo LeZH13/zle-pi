@@ -1,8 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { matchesKey, sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, matchesKey, sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export type ModalMode = "normal" | "insert";
+
+/** DECSCUSR terminal cursor shape sequences. */
+export const CURSOR_SHAPE_RESET = "\x1b[0 q";
+export const CURSOR_SHAPE_BLOCK = "\x1b[2 q";
+export const CURSOR_SHAPE_BEAM = "\x1b[6 q";
+export const CURSOR_RESET_SEQUENCE = `\x1b[?25h${CURSOR_SHAPE_RESET}`;
 
 type Motion = "h" | "j" | "k" | "l" | "0" | "^" | "$" | "w" | "b" | "e" | "I" | "A" | "a";
 type Edit = "x" | "s" | "dw" | "cw" | "dd" | "cc" | "d$" | "c$" | "o" | "O";
@@ -75,6 +81,59 @@ export function renderTopBorderWithBadge(
 	const keep = width - visibleWidth(tag);
 	if (keep < BADGE_MIN_KEEP) return nativeBorder;
 	return sliceByColumn(nativeBorder, 0, keep) + borderColor(tag);
+}
+
+/**
+ * Strip software inverse-video highlighting from the cursor grapheme in insert mode,
+ * allowing the terminal's hardware vertical line cursor to show cleanly without
+ * an inverted background block.
+ */
+export function stripCursorInverse(line: string): string {
+	const markerIndex = line.indexOf(CURSOR_MARKER);
+	if (markerIndex === -1) return line;
+	const afterMarker = line.slice(markerIndex + CURSOR_MARKER.length);
+	if (!afterMarker.startsWith("\x1b[7m")) return line;
+	const resetIndex = afterMarker.indexOf("\x1b[0m");
+	if (resetIndex === -1) return line;
+	const inner = afterMarker.slice("\x1b[7m".length, resetIndex);
+	const rest = afterMarker.slice(resetIndex + "\x1b[0m".length);
+	return line.slice(0, markerIndex) + CURSOR_MARKER + inner + rest;
+}
+
+/**
+ * Compose the vim mode indicator on the bottom border, left-aligned (`── NORMAL ───`),
+ * with pending keys surfaced vim-style (`── NORMAL 3d ───`).
+ * If width is insufficient or would collide with a scroll indicator, falls back to native.
+ */
+export function renderBottomBorderWithMode(
+	nativeBorder: string,
+	mode: ModalMode,
+	pendingLeader: string | undefined,
+	pendingCount: number | undefined,
+	width: number,
+	borderColor: (text: string) => string,
+): string {
+	if (width <= 0) return nativeBorder;
+	const core = mode === "normal" ? "NORMAL" : "INSERT";
+	const pending =
+		(pendingCount !== undefined ? String(pendingCount) : "") +
+		(pendingLeader ?? "");
+	const modeText = `${core}${pending ? ` ${pending}` : ""}`;
+	const tag = `── ${modeText} ──`;
+	const tagWidth = visibleWidth(tag);
+	if (width < tagWidth + 2) return nativeBorder;
+
+	// Preserve scroll indicators (e.g. `↓ 5 more`)
+	if (nativeBorder.includes("↓")) {
+		const scrollIndex = nativeBorder.indexOf("↓");
+		const scrollCol = visibleWidth(sliceByColumn(nativeBorder, 0, scrollIndex));
+		if (scrollCol < tagWidth + 2) return nativeBorder;
+	}
+
+	const rest = sliceByColumn(nativeBorder, tagWidth, width - tagWidth);
+	const styledMode = mode === "normal" ? `\x1b[1m${modeText}\x1b[22m` : modeText;
+	const styledTag = `── ${styledMode} ──`;
+	return borderColor(styledTag) + rest;
 }
 
 /** Private editor fields mirrored for vim undo/redo (same coupling pi-vim accepts). */
@@ -152,6 +211,8 @@ export class NamedSessionEditor extends CustomEditor {
 	private ignoringPaste = false;
 	/** The editor's own snapshot push, used for direct edits. */
 	private basePushUndo: () => void;
+	/** Last cursor shape escape sequence written to the terminal. */
+	private lastShapeWritten: string | undefined;
 
 	constructor(
 		tui: ConstructorParameters<typeof CustomEditor>[0],
@@ -168,10 +229,34 @@ export class NamedSessionEditor extends CustomEditor {
 			this.redoStack = [];
 			base();
 		};
+		this.tui?.setShowHardwareCursor?.(true);
+		this.syncHardwareCursor(true);
 	}
 
 	get vimMode(): ModalMode {
 		return this.mode;
+	}
+
+	private setMode(mode: ModalMode): void {
+		if (this.mode === mode) return;
+		this.mode = mode;
+		this.syncHardwareCursor(true);
+	}
+
+	private syncHardwareCursor(force = false): void {
+		const shape = this.mode === "normal" ? CURSOR_SHAPE_BLOCK : CURSOR_SHAPE_BEAM;
+		if (!force && this.lastShapeWritten === shape) return;
+		this.lastShapeWritten = shape;
+		this.tui?.terminal?.write?.(shape);
+	}
+
+	dispose(): void {
+		this.lastShapeWritten = undefined;
+		if (this.tui?.terminal?.write) {
+			this.tui.terminal.write(CURSOR_RESET_SEQUENCE);
+		} else if (process.stdout?.write) {
+			process.stdout.write(CURSOR_RESET_SEQUENCE);
+		}
 	}
 
 	private parts(text: string): { segment: string; index: number }[] {
@@ -307,7 +392,7 @@ export class NamedSessionEditor extends CustomEditor {
 		this.pendingLeader = undefined;
 		if (action.motion) for (let i = 0; i < count; i++) this.move(action.motion);
 		if (action.edit) this.edit(action.edit, count);
-		if (action.insert) this.mode = "insert";
+		if (action.insert) this.setMode("insert");
 	}
 
 	/** Vim `u`: snapshot the current state for redo, then run the editor's own undo. */
@@ -355,7 +440,7 @@ export class NamedSessionEditor extends CustomEditor {
 					super.handleInput(data); // dismiss the completion first
 					return;
 				}
-				this.mode = "normal";
+				this.setMode("normal");
 				this.desiredColumn = undefined;
 				const state = (this as unknown as EditorInternals).state;
 				if (state.cursorCol > 0) this.setCursor(this.cursorOffset() - 1);
@@ -433,17 +518,33 @@ export class NamedSessionEditor extends CustomEditor {
 		const lines = super.render(width);
 		if (lines.length === 0) return lines;
 
-		// Mode indicator on the bottom border, badge-style (` NORMAL ──`),
-		// with pending keys surfaced vim-style (` NORMAL 3d ──`)
-		const core = this.mode === "normal" ? "NORMAL" : "INSERT";
-		const pending =
-			(this.pendingCount !== undefined ? String(this.pendingCount) : "") +
-			(this.pendingLeader ?? "");
-		const tag = ` ${core}${pending ? ` ${pending}` : ""} ──`;
-		const last = lines.length - 1;
-		const tagWidth = visibleWidth(tag);
-		if (width > tagWidth && visibleWidth(lines[last]!) >= tagWidth) {
-			lines[last] = truncateToWidth(lines[last]!, width - tagWidth, "") + this.borderColor(tag);
+		this.syncHardwareCursor();
+
+		// Strip software cursor inverse styling in insert mode so the terminal's
+		// hardware vertical line cursor shows cleanly without an inverted background block.
+		if (this.mode === "insert") {
+			for (let i = 0; i < lines.length; i++) {
+				if (lines[i]!.includes(CURSOR_MARKER)) {
+					lines[i] = stripCursorInverse(lines[i]!);
+					break;
+				}
+			}
+		}
+
+		// Mode indicator on the bottom border, left-aligned (`── NORMAL ───`),
+		// with pending keys surfaced vim-style (`── NORMAL 3d ───`).
+		const autocompleteHeight =
+			(this as unknown as { renderedAutocompleteHeight?: number }).renderedAutocompleteHeight ?? 0;
+		const borderIndex = lines.length - 1 - autocompleteHeight;
+		if (borderIndex >= 0 && borderIndex < lines.length) {
+			lines[borderIndex] = renderBottomBorderWithMode(
+				lines[borderIndex]!,
+				this.mode,
+				this.pendingLeader,
+				this.pendingCount,
+				width,
+				this.borderColor,
+			);
 		}
 		return lines;
 	}
@@ -461,6 +562,13 @@ export class NamedSessionEditor extends CustomEditor {
 export default function editorExtension(pi: ExtensionAPI): void {
 	let requestRender: (() => void) | undefined;
 	let ourFactory: EditorFactory | undefined;
+	let activeEditor: NamedSessionEditor | undefined;
+
+	const onProcessExit = () => {
+		try {
+			process.stdout?.write?.(CURSOR_RESET_SEQUENCE);
+		} catch {}
+	};
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui") return;
@@ -469,12 +577,16 @@ export default function editorExtension(pi: ExtensionAPI): void {
 			ctx.ui.notify("Session-name badge deferred: another custom editor is active", "info");
 			return;
 		}
+		process.once("exit", onProcessExit);
 		const sessionCtx = ctx;
 		const factory: EditorFactory = (tui, theme, keybindings) => {
 			requestRender = () => tui.requestRender();
-			return new NamedSessionEditor(tui, theme, keybindings, () =>
+			activeEditor?.dispose();
+			const editor = new NamedSessionEditor(tui, theme, keybindings, () =>
 				sessionCtx.sessionManager.getSessionName(),
 			);
+			activeEditor = editor;
+			return editor;
 		};
 		ourFactory = factory;
 		ctx.ui.setEditorComponent(factory);
@@ -486,6 +598,10 @@ export default function editorExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		requestRender = undefined;
+		process.removeListener("exit", onProcessExit);
+		onProcessExit();
+		activeEditor?.dispose();
+		activeEditor = undefined;
 		if (ctx && ourFactory !== undefined && ctx.ui.getEditorComponent() === ourFactory) {
 			ctx.ui.setEditorComponent(undefined);
 		}

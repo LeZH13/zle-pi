@@ -54,4 +54,11 @@ Character deletion stops at the line boundary. `dd` removes the line and its sep
 
 Normal-mode keys mutate the editor state directly, not through user-configured Pi editor keybindings; insert-mode keys retain those bindings. Unsupported printable keys and bracketed paste in normal mode are ignored, and an incomplete operator combination is discarded. There is no `p/P` or yank/register support, buffer-level `gg/G`, distinct `W/B/E` WORD motions, search, text objects, or general operator grammar. Use insert mode and Pi's native shortcuts for other edits.
 
-The bottom border shows ` NORMAL ──` or ` INSERT ──` and pending keys such as ` NORMAL 3d ──`.
+The bottom border shows `── NORMAL ───` or `── INSERT ───` aligned on the bottom-left with bold emphasis in normal mode, as well as pending keys such as `── NORMAL 3d ───`.
+
+### Cursor shapes
+
+The editor automatically distinguishes modes using the terminal's hardware cursor:
+- **Normal mode**: Solid block cursor (`\x1b[2 q` steady block, accompanied by software inverse video).
+- **Insert mode**: Vertical line cursor (`\x1b[6 q` steady beam/bar), with software inverse highlighting stripped so the vertical bar renders cleanly.
+- **Shutdown / exit**: Restores the terminal cursor style back to the user's default (`\x1b[0 q`) and restores hardware cursor visibility.

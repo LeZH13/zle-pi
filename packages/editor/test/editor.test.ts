@@ -1,14 +1,20 @@
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, stripTerminalSequences } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import editorExtension, {
 	BADGE_MIN_KEEP,
 	NamedSessionEditor,
 	COMBO_LEADERS,
+	CURSOR_RESET_SEQUENCE,
+	CURSOR_SHAPE_BEAM,
+	CURSOR_SHAPE_BLOCK,
+	CURSOR_SHAPE_RESET,
 	NORMAL_COMBOS,
 	NORMAL_KEYS,
+	renderBottomBorderWithMode,
 	renderTopBorderWithBadge,
 	sanitizeSessionName,
+	stripCursorInverse,
 } from "../extensions/editor.js";
 
 const identity = (text: string) => text;
@@ -78,15 +84,95 @@ describe("modal input routing", () => {
 		const render = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [native(30), native(30)]);
 		try {
 			const editor = setup();
-			expect(stripTerminalSequences(editor.render(30)[1]!)).toBe("─".repeat(20) + " INSERT ──");
+			expect(stripTerminalSequences(editor.render(30)[1]!)).toBe("── INSERT ──" + "─".repeat(18));
 			editor.handleInput("\x1b");
 			editor.handleInput("3");
 			editor.handleInput("d");
-			expect(stripTerminalSequences(editor.render(30)[1]!)).toBe("─".repeat(17) + " NORMAL 3d ──");
+			expect(stripTerminalSequences(editor.render(30)[1]!)).toBe("── NORMAL 3d ──" + "─".repeat(15));
 			editor.handleInput("\x1b");
-			expect(stripTerminalSequences(editor.render(30)[1]!)).toBe("─".repeat(20) + " NORMAL ──");
+			expect(stripTerminalSequences(editor.render(30)[1]!)).toBe("── NORMAL ──" + "─".repeat(18));
 		} finally {
 			render.mockRestore();
+		}
+	});
+});
+
+describe("cursor shape and bottom border rendering", () => {
+	it("strips software cursor inverse in insert mode and preserves text", () => {
+		const lineWithChar = `hello ${CURSOR_MARKER}\x1b[7mw\x1b[0morld`;
+		expect(stripCursorInverse(lineWithChar)).toBe(`hello ${CURSOR_MARKER}world`);
+
+		const lineWithSpace = `hello world${CURSOR_MARKER}\x1b[7m \x1b[0m`;
+		expect(stripCursorInverse(lineWithSpace)).toBe(`hello world${CURSOR_MARKER} `);
+
+		const lineWithoutCursor = "hello world";
+		expect(stripCursorInverse(lineWithoutCursor)).toBe(lineWithoutCursor);
+	});
+
+	it("renders bottom border with mode and pending keys on the left", () => {
+		expect(stripTerminalSequences(renderBottomBorderWithMode(native(30), "insert", undefined, undefined, 30, identity)))
+			.toBe("── INSERT ──" + "─".repeat(18));
+		expect(stripTerminalSequences(renderBottomBorderWithMode(native(30), "normal", "d", 3, 30, identity)))
+			.toBe("── NORMAL 3d ──" + "─".repeat(15));
+		expect(renderBottomBorderWithMode(native(10), "insert", undefined, undefined, 10, identity))
+			.toBe(native(10));
+	});
+
+	it("preserves scroll down indicators on the bottom border", () => {
+		const scrollBorder = "───────── ↓ 2 more ──────────";
+		expect(renderBottomBorderWithMode(scrollBorder, "normal", undefined, undefined, scrollBorder.length, identity))
+			.toBe(scrollBorder);
+
+		const wideScrollBorder = "─".repeat(25) + " ↓ 2 more " + "─".repeat(25);
+		const rendered = renderBottomBorderWithMode(wideScrollBorder, "normal", undefined, undefined, wideScrollBorder.length, identity);
+		expect(stripTerminalSequences(rendered)).toContain("── NORMAL ──");
+		expect(stripTerminalSequences(rendered)).toContain("↓ 2 more");
+	});
+
+	it("manages hardware cursor shapes and resets on dispose", () => {
+		const terminalWrite = vi.fn();
+		const setShowHardwareCursor = vi.fn();
+		const mockTui = { terminal: { write: terminalWrite }, setShowHardwareCursor };
+
+		const editor = new NamedSessionEditor(
+			mockTui as never,
+			{ borderColor: identity, selectList: {} as never },
+			{ matches: () => false } as never,
+			() => "my-session",
+		);
+
+		expect(setShowHardwareCursor).toHaveBeenCalledWith(true);
+		expect(terminalWrite).toHaveBeenCalledWith(CURSOR_SHAPE_BEAM);
+
+		// Switch to normal mode -> sends block cursor sequence
+		editor.handleInput("\x1b");
+		expect(terminalWrite).toHaveBeenCalledWith(CURSOR_SHAPE_BLOCK);
+
+		// Switch back to insert mode -> sends beam cursor sequence
+		editor.handleInput("i");
+		expect(terminalWrite).toHaveBeenCalledWith(CURSOR_SHAPE_BEAM);
+
+		// Dispose resets terminal cursor and forces visibility on without hiding
+		editor.dispose();
+		expect(terminalWrite).toHaveBeenCalledWith(CURSOR_RESET_SEQUENCE);
+		expect(setShowHardwareCursor).not.toHaveBeenCalledWith(false);
+	});
+
+	it("strips software cursor inverse only in insert mode during render", () => {
+		const cursorLine = `hello ${CURSOR_MARKER}\x1b[7mw\x1b[0morld`;
+		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [cursorLine, native(30)]);
+		try {
+			const editor = setup();
+			// Insert mode: software cursor inverse is stripped
+			const insertLines = editor.render(30);
+			expect(insertLines[0]).toBe(`hello ${CURSOR_MARKER}world`);
+
+			// Normal mode: software cursor inverse is retained
+			editor.handleInput("\x1b");
+			const normalLines = editor.render(30);
+			expect(normalLines[0]).toBe(cursorLine);
+		} finally {
+			renderSpy.mockRestore();
 		}
 	});
 });
