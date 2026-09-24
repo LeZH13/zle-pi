@@ -1,7 +1,7 @@
 {
   "name": "@zle13/pi-editor",
-  "version": "0.1.0",
-  "description": "Show the explicit session name right-flush on the Pi input editor top border; unnamed sessions render the native border.",
+  "version": "0.2.0",
+  "description": "Show the session name and provide a focused Vim-style modal prompt editor for Pi.",
   "type": "module",
   "keywords": [
     "pi-package",
