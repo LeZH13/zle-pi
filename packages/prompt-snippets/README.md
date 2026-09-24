@@ -42,6 +42,21 @@ Then restart Pi or run `/reload` in your active session.
 
 ---
 
+## Audit past prompts and snippet usage
+
+Run `/snippets-audit` (optionally `/snippets-audit this project, last 60 days`) to ask the agent to review recent prompts against your effective snippets and recommend additions or consolidation. This is an extension command, **not a globally discoverable skill**. The command injects the bundled audit instructions into one agent turn; it does not edit your sessions or snippets.
+
+The bundled read-only Python 3 exporter scans local main-session JSONL files (not subagent transcripts). It defaults to 30 days, at most 30 recent sessions, and at most 60 qualifying prompts. Its report gives exact whitespace/case-normalized repeated prompt frequencies across sampled sessions, plus tracked snippet applications. The agent additionally reviews semantic variants and compares with bundled, global, and project snippets. To inspect the report yourself:
+
+```bash
+python3 audit/prompts.py --since-days 30 --cwd my-project
+python3 audit/prompts.py --since-days 30 --cwd my-project --format jsonl
+```
+
+From this version onward, when active snippets transform an input, the extension records their filename IDs and resolved sources as non-context session metadata—**not prompt or snippet bodies**. Each application counts once per snippet per transformed input. The audit can count these records across sessions; past uses before tracking was installed remain unknown. Samples and branched session histories can affect frequencies. A zero count is a reason to review a snippet, not proof it is unnecessary. Treat exported prompts as private and approve any snippet changes explicitly.
+
+---
+
 ## Multi-Directory Hierarchy
 
 Snippets are discovered dynamically across three layers (in increasing precedence):

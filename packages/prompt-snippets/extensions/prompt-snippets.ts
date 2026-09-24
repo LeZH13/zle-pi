@@ -9,12 +9,18 @@
  * - Project snippets (<cwd>/.pi/snippets/)
  */
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { loadSnippets } from "./loader.js";
 import type { LoadSnippetsOptions, Snippet } from "./types.js";
 
 const WIDGET_ID = "prompt-snippets";
+const USAGE_ENTRY_TYPE = "prompt-snippets:usage";
+const AUDIT_MARKER = "[prompt-snippets audit request]";
+const packageDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOptions = {}) {
 	return function promptSnippetsExtension(pi: ExtensionAPI) {
@@ -283,7 +289,7 @@ export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOpti
 		});
 
 		pi.on("input", async (event, ctx) => {
-			if (enabled.size === 0) return;
+			if (event.text.startsWith(AUDIT_MARKER) || enabled.size === 0) return;
 
 			snippets = getSnippets(ctx);
 			const active = snippets.filter((s) => enabled.has(s.id));
@@ -294,6 +300,9 @@ export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOpti
 
 			const prependBodies = active.filter((s) => s.placement === "prepend").map((s) => s.body);
 			const appendBodies = active.filter((s) => s.placement === "append").map((s) => s.body);
+			pi.appendEntry(USAGE_ENTRY_TYPE, {
+				snippets: active.map((s) => ({ id: s.id, source: s.source })),
+			});
 			return {
 				action: "transform",
 				text: [...prependBodies, event.text, ...appendBodies].join("\n\n"),
@@ -311,6 +320,18 @@ export function createPromptSnippetsExtension(extensionOptions: LoadSnippetsOpti
 			description: "Open the prompt snippet toggle menu",
 			handler: async (_args, ctx) => {
 				await openMenu(ctx);
+			},
+		});
+
+		pi.registerCommand("snippets-audit", {
+			description: "Analyze past prompts and recorded snippet usage",
+			handler: async (args, ctx) => {
+				if (!ctx.isIdle()) {
+					if (ctx.hasUI) ctx.ui.notify("Wait for the current turn before auditing snippets", "warning");
+					return;
+				}
+				const instructions = readFileSync(join(packageDir, "audit", "INSTRUCTIONS.md"), "utf8");
+				pi.sendUserMessage(`${AUDIT_MARKER}\n${instructions}\n\nBundled script: ${join(packageDir, "audit", "prompts.py")}\nPackage: ${packageDir}\nUser scope: ${args.trim() || "last 30 days, all projects"}`);
 			},
 		});
 	};

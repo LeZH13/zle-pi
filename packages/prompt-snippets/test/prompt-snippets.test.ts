@@ -30,6 +30,8 @@ describe("prompt snippets extension", () => {
 		registeredCommands = new Map();
 
 		mockPi = {
+			appendEntry: vi.fn(),
+			sendUserMessage: vi.fn(),
 			on: vi.fn((event: string, handler: Function) => {
 				registeredListeners.set(event, handler);
 			}),
@@ -61,6 +63,10 @@ describe("prompt snippets extension", () => {
 		});
 		expect(mockPi.registerCommand).toHaveBeenCalledWith("snippets", {
 			description: "Open the prompt snippet toggle menu",
+			handler: expect.any(Function),
+		});
+		expect(mockPi.registerCommand).toHaveBeenCalledWith("snippets-audit", {
+			description: "Analyze past prompts and recorded snippet usage",
 			handler: expect.any(Function),
 		});
 	});
@@ -153,17 +159,25 @@ order: 10
 		const command = registeredCommands.get("snippets");
 		await command.handler("", mockCtx);
 
-		// 3. User sends a message -> input event fires
+		// The audit request must not consume or record the pending selection.
 		const inputHandler = registeredListeners.get("input");
+		expect(await inputHandler!({ text: "[prompt-snippets audit request]\nReview" }, mockCtx)).toBeUndefined();
+		expect(mockPi.appendEntry).not.toHaveBeenCalled();
+
+		// 3. User sends a message -> input event fires
 		const transformResult = await inputHandler!({ text: "Hello AI" }, mockCtx);
 
 		expect(transformResult).toBeDefined();
 		expect(transformResult.action).toBe("transform");
 		expect(transformResult.text).toBe("[PREPEND CONTENT]\n\nHello AI\n\n[APPEND CONTENT]");
+		expect(mockPi.appendEntry).toHaveBeenCalledWith("prompt-snippets:usage", {
+			snippets: [{ id: "prep.md", source: "project" }, { id: "app.md", source: "project" }],
+		});
 
 		// 4. Next message should not transform because snippets auto-reset after each send
 		const secondResult = await inputHandler!({ text: "Next message" }, mockCtx);
 		expect(secondResult).toBeUndefined();
+		expect(mockPi.appendEntry).toHaveBeenCalledTimes(1);
 	});
 
 	it("supports custom keybindings (like Emacs ctrl+n and ctrl+p) in menu and preview", async () => {
@@ -261,6 +275,18 @@ order: 10
 
 		expect(transformResult).toBeDefined();
 		expect(transformResult.text).toBe("Item 1 content\n\nItem 2 content\n\nTest prompt");
+	});
+
+	it("injects scoped audit instructions only when idle", async () => {
+		createPromptSnippetsExtension({ bundledDir, agentDir })(mockPi);
+		const command = registeredCommands.get("snippets-audit");
+		const ctx = { isIdle: () => true, hasUI: false } as unknown as ExtensionContext;
+		await command.handler("this project, last 60 days", ctx);
+		expect(mockPi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("User scope: this project, last 60 days"));
+		expect(mockPi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("/audit/prompts.py"));
+		expect(mockPi.sendUserMessage).toHaveBeenCalledWith(expect.stringContaining("# Prompt-snippet audit"));
+		await command.handler("", { isIdle: () => false, hasUI: false });
+		expect(mockPi.sendUserMessage).toHaveBeenCalledTimes(1);
 	});
 
 	it("cleans up widgets and state on session_shutdown", () => {

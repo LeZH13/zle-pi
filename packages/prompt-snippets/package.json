@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-prompt-snippets",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Mix-and-match prompt snippets that prepend or append rules to messages in Pi",
   "type": "module",
   "keywords": [
@@ -10,12 +10,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LeZH13/zle-pi.git",
+    "url": "git+https://github.com/LeZH13/zle-pi.git",
     "directory": "packages/prompt-snippets"
   },
   "files": [
     "extensions",
     "snippets",
+    "audit",
     "README.md"
   ],
   "publishConfig": {
