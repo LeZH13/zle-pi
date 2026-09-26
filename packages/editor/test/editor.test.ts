@@ -175,6 +175,81 @@ describe("cursor shape and bottom border rendering", () => {
 			renderSpy.mockRestore();
 		}
 	});
+
+	it("restores hardware cursor and re-emits cursor shape after external reset (e.g. /reload)", () => {
+		let hardwareCursor = false;
+		const terminalWrite = vi.fn();
+		const setShowHardwareCursor = vi.fn((val: boolean) => {
+			hardwareCursor = val;
+		});
+		const getShowHardwareCursor = vi.fn(() => hardwareCursor);
+		const mockTui = {
+			terminal: { write: terminalWrite },
+			setShowHardwareCursor,
+			getShowHardwareCursor,
+		};
+
+		const editor = new NamedSessionEditor(
+			mockTui as never,
+			{ borderColor: identity, selectList: {} as never },
+			{ matches: () => false } as never,
+			() => "my-session",
+		);
+
+		expect(setShowHardwareCursor).toHaveBeenCalledWith(true);
+		expect(terminalWrite).toHaveBeenCalledWith(CURSOR_SHAPE_BEAM);
+		setShowHardwareCursor.mockClear();
+		terminalWrite.mockClear();
+
+		// Simulate Pi's handleReloadCommand calling applyRuntimeSettings(),
+		// which resets showHardwareCursor back to false
+		hardwareCursor = false;
+
+		const cursorLine = `hello ${CURSOR_MARKER}\x1b[7mw\x1b[0morld`;
+		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [cursorLine, native(30)]);
+		try {
+			// First render after reload: detects false, re-enables hardware cursor and forces beam shape
+			const lines = editor.render(30);
+			expect(setShowHardwareCursor).toHaveBeenCalledWith(true);
+			expect(terminalWrite).toHaveBeenCalledWith(CURSOR_SHAPE_BEAM);
+			// Inverse is stripped because hardware cursor is restored
+			expect(lines[0]).toBe(`hello ${CURSOR_MARKER}world`);
+
+			// Subsequent render with hardware cursor still active: no redundant setter or escape sequence
+			setShowHardwareCursor.mockClear();
+			terminalWrite.mockClear();
+			editor.render(30);
+			expect(setShowHardwareCursor).not.toHaveBeenCalled();
+			expect(terminalWrite).not.toHaveBeenCalled();
+		} finally {
+			renderSpy.mockRestore();
+		}
+	});
+
+	it("preserves software cursor inverse when hardware cursor cannot be enabled", () => {
+		const mockTui = {
+			terminal: { write: vi.fn() },
+			setShowHardwareCursor: vi.fn(),
+			getShowHardwareCursor: vi.fn(() => false),
+		};
+
+		const editor = new NamedSessionEditor(
+			mockTui as never,
+			{ borderColor: identity, selectList: {} as never },
+			{ matches: () => false } as never,
+			() => "my-session",
+		);
+
+		const cursorLine = `hello ${CURSOR_MARKER}\x1b[7mw\x1b[0morld`;
+		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [cursorLine, native(30)]);
+		try {
+			// Insert mode: software cursor inverse is preserved when hardware cursor remains false
+			const lines = editor.render(30);
+			expect(lines[0]).toBe(cursorLine);
+		} finally {
+			renderSpy.mockRestore();
+		}
+	});
 });
 
 describe("editorExtension lifecycle", () => {

@@ -244,6 +244,10 @@ export class NamedSessionEditor extends CustomEditor {
 	}
 
 	private syncHardwareCursor(force = false): void {
+		if (this.tui?.getShowHardwareCursor?.() === false) {
+			this.tui?.setShowHardwareCursor?.(true);
+			force = true;
+		}
 		const shape = this.mode === "normal" ? CURSOR_SHAPE_BLOCK : CURSOR_SHAPE_BEAM;
 		if (!force && this.lastShapeWritten === shape) return;
 		this.lastShapeWritten = shape;
@@ -522,7 +526,9 @@ export class NamedSessionEditor extends CustomEditor {
 
 		// Strip software cursor inverse styling in insert mode so the terminal's
 		// hardware vertical line cursor shows cleanly without an inverted background block.
-		if (this.mode === "insert") {
+		// If hardware cursor is disabled or unavailable, preserve the software inverse
+		// styling so the cursor remains visible.
+		if (this.mode === "insert" && this.tui?.getShowHardwareCursor?.() !== false) {
 			for (let i = 0; i < lines.length; i++) {
 				if (lines[i]!.includes(CURSOR_MARKER)) {
 					lines[i] = stripCursorInverse(lines[i]!);

@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-editor",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Show the session name and provide a focused Vim-style modal prompt editor for Pi.",
   "type": "module",
   "keywords": [
