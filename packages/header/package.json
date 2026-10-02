@@ -1,0 +1,43 @@
+{
+  "name": "@zle13/pi-header",
+  "version": "0.1.0",
+  "description": "Custom Pi startup header with side-by-side ASCII logo and dynamic keybinding hints.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "header",
+    "tui"
+  ],
+  "author": "zle13",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeZH13/zle-pi.git",
+    "directory": "packages/header"
+  },
+  "files": [
+    "extensions",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/header.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run"
+  }
+}
