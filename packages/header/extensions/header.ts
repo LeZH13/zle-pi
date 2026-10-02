@@ -103,7 +103,7 @@ export function buildHeaderLines(theme: Theme, expanded = false, width = 120): s
 		hint("app.thinking.cycle", "to cycle thinking level"),
 		cycleKeys ? rawHint(cycleKeys, "to cycle models") : undefined,
 		hint("app.model.select", "to select model"),
-		hint("app.tools.expand", "to expand tools"),
+		hint("app.tools.expand", "to toggle tool output"),
 		hint("app.thinking.toggle", "to expand thinking"),
 		hint("app.editor.external", "for external editor"),
 		rawHint("/", "for commands"),
@@ -155,6 +155,9 @@ export function buildHeaderLines(theme: Theme, expanded = false, width = 120): s
 			rightLines.push(h1 ? h1 + pad + h2 : "");
 		}
 		rightLines.push("");
+		if (expandKey) {
+			rightLines.push(theme.fg("dim", `Press ${expandKey} to collapse startup help.`));
+		}
 		rightLines.push(`${onboarding1} ${onboarding2}`);
 	} else {
 		// Expanded single-column mode
@@ -163,9 +166,9 @@ export function buildHeaderLines(theme: Theme, expanded = false, width = 120): s
 			"",
 			...allHints,
 			"",
-			onboarding1,
-			onboarding2,
-		];
+			expandKey ? theme.fg("dim", `Press ${expandKey} to collapse startup help.`) : "",
+			`${onboarding1} ${onboarding2}`,
+		].filter(Boolean);
 	}
 
 	const maxRows = Math.max(styledAscii.length, rightLines.length);

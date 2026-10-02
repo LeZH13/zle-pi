@@ -167,6 +167,7 @@ describe("header extension", () => {
 				"app.model.cycleForward": "alt+p",
 				"app.model.cycleBackward": "alt+n",
 				"app.editor.external": "alt+e",
+				"app.tools.expand": "alt+o",
 			} as any));
 
 			const lines = buildHeaderLines(mockTheme, true, 120);
@@ -178,9 +179,29 @@ describe("header extension", () => {
 			if (process.platform === "darwin") {
 				expect(plainText).toContain("option+p/option+n to cycle models");
 				expect(plainText).toContain("option+e for external editor");
+				expect(plainText).toContain("option+o to toggle tool output");
+				expect(plainText).toContain("Press option+o to collapse startup help.");
 			} else {
 				expect(plainText).toContain("alt+p/alt+n to cycle models");
 				expect(plainText).toContain("alt+e for external editor");
+				expect(plainText).toContain("alt+o to toggle tool output");
+				expect(plainText).toContain("Press alt+o to collapse startup help.");
+			}
+		});
+
+		it("reflects custom expand key in compact mode", () => {
+			setKeybindings(new KeybindingsManager(mockDefinitions as any, {
+				"app.tools.expand": "alt+o",
+			} as any));
+
+			const lines = buildHeaderLines(mockTheme, false, 120);
+			const plainText = lines.map(l => stripTerminalSequences(l)).join("\n");
+			if (process.platform === "darwin") {
+				expect(plainText).toContain("option+o more");
+				expect(plainText).toContain("Press option+o to show full startup help.");
+			} else {
+				expect(plainText).toContain("alt+o more");
+				expect(plainText).toContain("Press alt+o to show full startup help.");
 			}
 		});
 
