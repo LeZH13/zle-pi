@@ -1,0 +1,43 @@
+{
+  "name": "@zle13/pi-recap",
+  "version": "0.1.0",
+  "description": "Session recaps and automatic session naming for Pi.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "recap",
+    "session"
+  ],
+  "author": "zle13",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LeZH13/zle-pi.git",
+    "directory": "packages/recap"
+  },
+  "files": [
+    "extensions",
+    "lib",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/recap.ts"
+    ]
+  },
+  "scripts": {
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit",
+    "pack:check": "npm pack --dry-run"
+  }
+}

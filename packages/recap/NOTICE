@@ -1,0 +1,10 @@
+@zle13/pi-recap
+
+Adapted from pi-recap by L2ncE:
+https://github.com/L2ncE/pi-recap
+Copyright 2026 L2ncE
+Licensed under the Apache License, Version 2.0.
+
+Modifications by zle13: automatic session naming, settled-run scheduling,
+trusted effective settings, runtime exclusions, cancellable background work,
+stale-result protection, and Pi-native terminal rendering.
