@@ -1,0 +1,9 @@
+@zle13/pi-todo
+Copyright 2026 zle13
+
+This package is a fork of @juicesharp/rpiv-todo (Copyright 2026 juicesharp,
+MIT licensed, https://github.com/juicesharp/rpiv-mono). The task tool,
+reducer, replay, and rendering code derive from that project under the MIT
+license; the enablement, view control, preference persistence, guidance, and
+overlay behaviors were rewritten for this fork. Localizations, the i18n
+bridge, and the optional upstream configuration file were removed.
