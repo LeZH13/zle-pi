@@ -25,9 +25,29 @@ export interface GuardInput {
 	signal?: AbortSignal;
 }
 
+/**
+ * How a risky command was decided, for the footer tally: passed by Jev, asked
+ * and allowed by the user, or blocked. Unset for commands that never reached a
+ * decision (not risky, allow pattern, session-allowed).
+ */
+export type GuardVerdict = "passed" | "asked" | "blocked";
+
 export type GuardOutcome =
-	| { action: "allow"; reason: string }
-	| { action: "block"; reason: string };
+	| { action: "allow"; reason: string; jev?: JevScore; verdict?: "passed" | "asked" }
+	| { action: "block"; reason: string; verdict?: "blocked" };
+
+/** Jev's irreversibility probability for a command that was judged and then allowed. */
+export interface JevScore {
+	/** Probability (0..1) that the command causes irreversible loss. */
+	p: number;
+	/** True when the user approved an escalation rather than Jev passing it below the threshold. */
+	userApproved: boolean;
+}
+
+/** Compact transcript label for a Jev-judged command, shown under the command line. */
+export function formatGuardScore(score: JevScore): string {
+	return `jev p=${score.p.toFixed(2)} ${score.userApproved ? "allowed by user" : "recoverable"}`;
+}
 
 export const SELECT_OPTIONS = ["Allow once", "Allow for this session", "Block"] as const;
 
@@ -56,6 +76,11 @@ function reasonList(matches: readonly RiskyMatch[]): string {
 		parts.push(`${match.ruleId}: ${match.description}`);
 	}
 	return parts.join("; ");
+}
+
+/** Jev score for a user-approved escalation; rules-only escalations carry none. */
+function scoreFrom(probability: number | undefined): JevScore | undefined {
+	return probability === undefined ? undefined : { p: probability, userApproved: true };
 }
 
 export async function runGuard(deps: GuardDeps, input: GuardInput): Promise<GuardOutcome> {
@@ -102,7 +127,12 @@ export async function runGuard(deps: GuardDeps, input: GuardInput): Promise<Guar
 	}
 
 	if (answer.p < deps.config.guard.allowBelow) {
-		return { action: "allow", reason: `Jev judged it recoverable (p=${answer.p.toFixed(2)})` };
+		return {
+			action: "allow",
+			reason: `Jev judged it recoverable (p=${answer.p.toFixed(2)})`,
+			jev: { p: answer.p, userApproved: false },
+			verdict: "passed",
+		};
 	}
 
 	return escalate(deps, input, reasons, answer.p, `irreversible p=${answer.p.toFixed(2)} (allowBelow=${deps.config.guard.allowBelow})`);
@@ -116,11 +146,11 @@ async function escalate(
 	jevDetail: string,
 ): Promise<GuardOutcome> {
 	if (input.signal?.aborted) {
-		return { action: "block", reason: `aborted before decision (${jevDetail})` };
+		return { action: "block", reason: `aborted before decision (${jevDetail})`, verdict: "blocked" };
 	}
 	const blockReason = `bash-guard: risky command - ${reasons} - ${jevDetail}`;
 	if (!deps.hasUI) {
-		return { action: "block", reason: `${blockReason} (no UI to confirm)` };
+		return { action: "block", reason: `${blockReason} (no UI to confirm)`, verdict: "blocked" };
 	}
 	let choice: string | undefined;
 	try {
@@ -128,18 +158,18 @@ async function escalate(
 		// below still fails closed.
 		choice = await deps.select(`bash-guard risky command\n${reasons}\n${jevDetail}`, SELECT_OPTIONS, { signal: input.signal });
 	} catch {
-		return { action: "block", reason: `${blockReason} (selection failed)` };
+		return { action: "block", reason: `${blockReason} (selection failed)`, verdict: "blocked" };
 	}
 	if (input.signal?.aborted) {
-		return { action: "block", reason: `${blockReason} (aborted during confirmation)` };
+		return { action: "block", reason: `${blockReason} (aborted during confirmation)`, verdict: "blocked" };
 	}
 	if (choice === "Allow once") {
-		return { action: "allow", reason: "allowed once by user" };
+		return { action: "allow", reason: "allowed once by user", jev: scoreFrom(probability), verdict: "asked" };
 	}
 	if (choice === "Allow for this session") {
 		deps.allowForSession(input.command);
-		return { action: "allow", reason: "allowed for this session by user" };
+		return { action: "allow", reason: "allowed for this session by user", jev: scoreFrom(probability), verdict: "asked" };
 	}
 	// "Block" or a dismissed dialog (undefined) both fail closed.
-	return { action: "block", reason: blockReason };
+	return { action: "block", reason: blockReason, verdict: "blocked" };
 }

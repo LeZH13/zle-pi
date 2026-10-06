@@ -34,13 +34,13 @@ import {
 	type ExtensionUIContext,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
-import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { Container, Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import { DEFAULT_CONFIG, loadConfig, type BashGuardConfig } from "../src/config.js";
-import { runGuard, type GuardDeps, type GitInfo } from "../src/guard.js";
+import { formatGuardScore, runGuard, type GuardDeps, type GitInfo, type JevScore } from "../src/guard.js";
 import { createJev, type Jev } from "../src/jev.js";
 import { RISKY_RULES, compilePatterns, type RiskyScan } from "../src/rules.js";
 import { ALLOW_ENTRY_TYPE, restoreState, TOGGLES_ENTRY_TYPE } from "../src/state.js";
-import { renderStatus, type StatusStyler } from "../src/status.js";
+import { renderStatus, type GuardTally, type StatusStyler } from "../src/status.js";
 import { Watchdog, type WatchCheckRecord } from "../src/watchdog.js";
 
 const FLAG_NAME = "no-bash-guard";
@@ -48,6 +48,12 @@ const COMMAND_NAME = "bash-guard";
 const STATUS_KEY = "bash-guard";
 
 const ARGUMENT_COMPLETIONS = ["status", "on", "off", "guard on", "guard off", "watchdog on", "watchdog off"];
+
+/** Bounded toolCallId → score-label map for the transcript score line. */
+const GUARD_SCORE_MAP_LIMIT = 512;
+
+/** Footer clock refresh while watched commands run. */
+const STATUS_TICK_MS = 1000;
 
 export default function bashGuardExtension(pi: ExtensionAPI): void {
 	pi.registerFlag(FLAG_NAME, {
@@ -73,7 +79,10 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let bashRegistered = false;
 	let bashConflict = false;
 	let jevOffNotified = false;
+	let guardScores = new Map<string, string>();
 	let risky: RiskyScan = { rules: RISKY_RULES, extra: [], allow: [] };
+	let tally: GuardTally = { passed: 0, asked: 0, blocked: 0 };
+	let statusTick: ReturnType<typeof setInterval> | undefined;
 
 	const flagDisabled = (): boolean => pi.getFlag(FLAG_NAME) === true;
 	const guardOn = (): boolean => !flagDisabled() && config.guard.enabled && sessionGuard;
@@ -115,12 +124,30 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 					guardOn: guardOn(),
 					watchdogOn: watchdogOn(),
 					jevAvailable: jev.available,
-					running: watchdog?.runningCount() ?? 0,
+					jevFailure: jev.lastFailure,
 					bashConflict,
+					tally,
+					live: watchdog?.live(),
 				},
 				styler,
 			),
 		);
+	}
+
+	/** Tick the footer clock only while watched commands run. */
+	function syncStatusTick(): void {
+		const running = (watchdog?.runningCount() ?? 0) > 0;
+		if (running && !statusTick) {
+			statusTick = setInterval(() => refreshStatus(), STATUS_TICK_MS);
+		} else if (!running && statusTick) {
+			clearInterval(statusTick);
+			statusTick = undefined;
+		}
+	}
+
+	function stopStatusTick(): void {
+		if (statusTick) clearInterval(statusTick);
+		statusTick = undefined;
 	}
 
 	function ensureBashOverride(cwd: string): void {
@@ -131,6 +158,8 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				if (!watchdogOn()) return inner.exec(command, execCwd, options);
 				const controller = new AbortController();
 				const entry = watchdog!.start(command, execCwd, { abort: () => controller.abort() });
+				syncStatusTick();
+				refreshStatus();
 				const outer = options.signal;
 				const onOuterAbort = () => controller.abort();
 				if (outer) {
@@ -154,6 +183,8 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				} finally {
 					outer?.removeEventListener("abort", onOuterAbort);
 					watchdog!.finish(entry);
+					syncStatusTick();
+					refreshStatus();
 				}
 			},
 		};
@@ -215,6 +246,39 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		};
 	}
 
+	function rememberGuardScore(toolCallId: string, score: JevScore): void {
+		while (guardScores.size >= GUARD_SCORE_MAP_LIMIT) {
+			const oldest = guardScores.keys().next().value;
+			if (oldest === undefined) break;
+			guardScores.delete(oldest);
+		}
+		guardScores.set(toolCallId, formatGuardScore(score));
+	}
+
+	// --- guard score rendering -------------------------------------------------
+	// Under the command line of every bash call the guard judged and allowed,
+	// render Jev's verdict in a dim line. The built-in renderCall reuses
+	// context.lastComponent (a Text it mutates via setText), so delegate with a
+	// fresh component and compose a container whenever a score is present.
+	pi.registerToolRenderer((toolName, next) => {
+		if (toolName !== "bash") return undefined;
+		const base = next();
+		const baseRenderCall = base?.renderCall;
+		if (!baseRenderCall) return base;
+		return {
+			...base,
+			renderCall: (args, theme, context) => {
+				const component = baseRenderCall(args, theme, { ...context, lastComponent: undefined });
+				const label = guardScores.get(context.toolCallId);
+				if (label === undefined) return component;
+				const container = new Container();
+				container.addChild(component);
+				container.addChild(new Text(theme.fg("muted", `⛨ bash-guard: ${label}`), 0, 0));
+				return container;
+			},
+		};
+	});
+
 	// --- guard ---------------------------------------------------------------
 
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
@@ -225,7 +289,14 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			cwd: ctx.cwd,
 			signal: ctx.signal,
 		});
-		if (outcome.action === "allow") return undefined;
+		if (outcome.verdict) {
+			tally = { ...tally, [outcome.verdict]: tally[outcome.verdict] + 1 };
+		}
+		refreshStatus(ctx);
+		if (outcome.action === "allow") {
+			if (outcome.jev) rememberGuardScore(event.toolCallId, outcome.jev);
+			return undefined;
+		}
 		if (ctx.hasUI) ctx.ui.notify(outcome.reason, "error");
 		return { block: true, reason: outcome.reason };
 	});
@@ -269,7 +340,9 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		sessionWatchdog = restored.toggles?.watchdog ?? true;
 		allowedCommands = new Set(restored.allowedCommands);
 		jevOffNotified = false;
+		guardScores = new Map();
 		bashConflict = false;
+		tally = { passed: 0, asked: 0, blocked: 0 };
 
 		jev = createJev({
 			getRegistry: () => currentRegistry,
@@ -282,6 +355,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			notifySafe(`bash-guard: ${jev.describeUnavailable()}`, "warning");
 		}
 
+		stopStatusTick();
 		watchdog?.dispose();
 		watchdog = new Watchdog({
 			config,
@@ -305,6 +379,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
+		stopStatusTick();
 		watchdog?.dispose();
 		currentRegistry = undefined;
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -317,7 +392,9 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			`guard: ${guardOn() ? "on" : "off"} (config ${config.guard.enabled}, session ${sessionGuard}, flag ${flagDisabled() ? "off" : "on"})`,
 			`watchdog: ${watchdogOn() ? "on" : "off"} - tracking ${watchdog?.runningCount() ?? 0} command(s)` +
 				(bashRegistered ? (bashConflict ? " - override lost to another extension" : " - bash override registered") : " - not overriding bash"),
-			`jev: ${jev.available ? "on" : "off"} - ${jev.available ? jev.model : jev.describeUnavailable()} (timeout ${config.jev.timeoutMs}ms)`,
+			`jev: ${jev.available ? "on" : "off"} - ${jev.available ? jev.model : jev.describeUnavailable()} (timeout ${config.jev.timeoutMs}ms)` +
+				(jev.lastFailure ? ` - last call failed: ${jev.lastFailure}` : ""),
+			`guard decisions (session): ${tally.passed} passed by Jev, ${tally.asked} asked and allowed, ${tally.blocked} blocked`,
 			`first check ${config.watchdog.firstCheckSec}s, interval ${config.watchdog.intervalSec}s, confidence ${config.watchdog.confidence}, agree checks ${config.watchdog.agreeChecks}`,
 			`allowBelow ${config.guard.allowBelow}, session-allowed commands: ${allowedCommands.size}, allow patterns: ${config.guard.allowPatterns.length}, extra risky patterns: ${config.guard.extraRiskyPatterns.length}`,
 			`config: ${configFiles.length > 0 ? configFiles.join(", ") : "defaults (no bash-guard.json found)"}`,
@@ -407,6 +484,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				bashConflict = detectBashConflict();
 			} else {
 				watchdog?.dispose();
+				stopStatusTick();
 			}
 			refreshStatus(ctx);
 		},

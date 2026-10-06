@@ -204,3 +204,22 @@ describe("jev classify calls", () => {
 		expect(jev.usage()).toEqual({ input: 20, output: 10, totalTokens: 30, cost: 0.0004 });
 	});
 });
+
+describe("jev last failure", () => {
+	it("remembers the latest failure, clears on success, and ignores caller aborts", async () => {
+		let next: Partial<ClassifierResult> = { stopReason: "error", errorMessage: "boom" };
+		const registry = makeRegistry({ typesafe: ["jev-latest"] }, async () => next);
+		const jev = makeJev(registry);
+		expect(jev.lastFailure).toBeUndefined();
+		await jev.guardAnswer({ value: {} });
+		expect(jev.lastFailure).toBe("error");
+		next = { stopReason: "aborted" };
+		const aborted = new AbortController();
+		aborted.abort();
+		await jev.guardAnswer({ value: {} }, aborted.signal);
+		expect(jev.lastFailure).toBe("error");
+		next = stopResult({ irreversible: { type: "bool", probability: 0.1 } });
+		await jev.guardAnswer({ value: {} });
+		expect(jev.lastFailure).toBeUndefined();
+	});
+});

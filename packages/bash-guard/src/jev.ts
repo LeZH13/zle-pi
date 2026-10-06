@@ -78,6 +78,8 @@ export interface Jev {
 	watchdogAnswer(state: unknown, signal?: AbortSignal): Promise<WatchdogJevResult>;
 	/** Session totals from classifier calls that reported usage. */
 	usage(): JevUsage;
+	/** Reason of the most recent failed call; cleared by the next answer. Caller aborts never set it. */
+	readonly lastFailure: JevFailureReason | undefined;
 }
 
 /** Jev models in preference order; Clef/llama classifier models are excluded. */
@@ -153,6 +155,13 @@ export function createJev(deps: JevDeps): Jev {
 	let resolved: Resolution | undefined;
 	let configuredMissing: { provider: string; modelId: string } | undefined;
 	let usageTotals: JevUsage = { input: 0, output: 0, totalTokens: 0, cost: 0 };
+	let lastFailure: JevFailureReason | undefined;
+
+	function track<T extends GuardJevResult | WatchdogJevResult>(result: T): T {
+		if (result.ok) lastFailure = undefined;
+		else if (result.reason !== "aborted") lastFailure = result.reason;
+		return result;
+	}
 
 	function labelOf(model: ClassifierModel<ClassifierApi>): string {
 		return `${model.provider}/${model.id}`;
@@ -254,39 +263,46 @@ export function createJev(deps: JevDeps): Jev {
 			}
 			return "no Jev classifier is available - run `/login openrouter` or set TYPESAFE_API_KEY / OPENROUTER_API_KEY";
 		},
-		async guardAnswer(state, signal): Promise<GuardJevResult> {
-			const result = await ask(state, { irreversible: GUARD_QUESTION }, signal);
-			if (!("answers" in result)) return result;
-			const answer = result.answers.irreversible;
-			if (answer?.type !== "bool" || !isProbability(answer.probability)) return { ok: false, reason: "malformed" };
-			return { ok: true, p: answer.probability, model: `${result.provider}/${result.model}` };
+		get lastFailure(): JevFailureReason | undefined {
+			return lastFailure;
 		},
-		async watchdogAnswer(state, signal): Promise<WatchdogJevResult> {
-			const result = await ask(state, WATCHDOG_QUESTIONS, signal);
-			if (!("answers" in result)) return result;
-			const statusAnswer = result.answers.status;
-			if (statusAnswer?.type !== "choice" || !WATCHDOG_STATUSES.includes(statusAnswer.choice as WatchdogStatus)) {
-				return { ok: false, reason: "malformed" };
-			}
-			const pStatus = (statusAnswer.probabilities as Record<string, unknown> | undefined)?.[statusAnswer.choice];
-			if (!isProbability(pStatus)) return { ok: false, reason: "malformed" };
-			const persistent = result.answers.persistent;
-			if (persistent?.type !== "bool" || !isProbability(persistent.probability)) return { ok: false, reason: "malformed" };
-			const probabilities: Record<string, number> = {};
-			for (const [label, value] of Object.entries(statusAnswer.probabilities ?? {})) {
-				if (isProbability(value)) probabilities[label] = value;
-			}
-			return {
-				ok: true,
-				status: statusAnswer.choice as WatchdogStatus,
-				pStatus,
-				probabilities,
-				persistent: persistent.probability,
-				model: `${result.provider}/${result.model}`,
-			};
-		},
+		guardAnswer: async (state, signal) => track(await guardAnswer(state, signal)),
+		watchdogAnswer: async (state, signal) => track(await watchdogAnswer(state, signal)),
 		usage(): JevUsage {
 			return { ...usageTotals };
 		},
 	};
+
+	async function guardAnswer(state: unknown, signal: AbortSignal | undefined): Promise<GuardJevResult> {
+		const result = await ask(state, { irreversible: GUARD_QUESTION }, signal);
+		if (!("answers" in result)) return result;
+		const answer = result.answers.irreversible;
+		if (answer?.type !== "bool" || !isProbability(answer.probability)) return { ok: false, reason: "malformed" };
+		return { ok: true, p: answer.probability, model: `${result.provider}/${result.model}` };
+	}
+
+	async function watchdogAnswer(state: unknown, signal: AbortSignal | undefined): Promise<WatchdogJevResult> {
+		const result = await ask(state, WATCHDOG_QUESTIONS, signal);
+		if (!("answers" in result)) return result;
+		const statusAnswer = result.answers.status;
+		if (statusAnswer?.type !== "choice" || !WATCHDOG_STATUSES.includes(statusAnswer.choice as WatchdogStatus)) {
+			return { ok: false, reason: "malformed" };
+		}
+		const pStatus = (statusAnswer.probabilities as Record<string, unknown> | undefined)?.[statusAnswer.choice];
+		if (!isProbability(pStatus)) return { ok: false, reason: "malformed" };
+		const persistent = result.answers.persistent;
+		if (persistent?.type !== "bool" || !isProbability(persistent.probability)) return { ok: false, reason: "malformed" };
+		const probabilities: Record<string, number> = {};
+		for (const [label, value] of Object.entries(statusAnswer.probabilities ?? {})) {
+			if (isProbability(value)) probabilities[label] = value;
+		}
+		return {
+			ok: true,
+			status: statusAnswer.choice as WatchdogStatus,
+			pStatus,
+			probabilities,
+			persistent: persistent.probability,
+			model: `${result.provider}/${result.model}`,
+		};
+	}
 }

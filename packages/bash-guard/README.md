@@ -24,6 +24,8 @@ Matching happens on the command that actually runs: leading env assignments (`X=
 - Without any Jev classifier (check `/bash-guard status`) the table runs **rules-only**: risky commands still escalate, and you get a one-time notice naming how to enable Jev (for example `/login openrouter` or setting `TYPESAFE_API_KEY` / `OPENROUTER_API_KEY`).
 
 `allowBelow` calibration from live Jev scores: routine cleanups (`rm -rf build`/`node_modules`/`dist`, `find -delete`, `docker system prune`) score ≈0.2–0.48 and pass at 0.5; clearly destructive commands (`rm -rf ~`/`/` ≈0.95, `DROP DATABASE` ≈0.84, `rm -rf .git` ≈0.72, `push --force main` ≈0.61, `reset --hard HEAD~5` ≈0.52) escalate. `git clean -fd` (≈0.57) asks; `git branch -D` (≈0.35) passes as reflog-recoverable. Lower `allowBelow` for stricter behavior.
+
+**Jev score line.** Every bash call the guard judged and then allowed — including the silent below-threshold passes and dialog approvals — renders a dim `⛨ bash-guard: jev p=0.31 recoverable` line under the command in the transcript (`⛨ bash-guard: jev p=0.60 allowed by user` after a dialog approval; the ⛨ badge matches the footer status identity). Blocked commands show the same score inside their block reason, so no extra line is rendered there. Scores live for the running session only; resumed sessions do not re-render lines for older calls.
 - Allow patterns (user config) win over built-in risky rules.
 
 **Watchdog (running commands).** The watchdog overrides the `bash` tool with pi's own local shell operations wrapped in a tracking layer. Each running command gets a bounded output tail (redacted before anything is sent anywhere) and periodic Jev checks — first at `firstCheckSec` (default 120), then every `intervalSec` (default 300) — asking:
@@ -69,7 +71,27 @@ A configured model that is unavailable is reported and the guard stays rules-onl
 /bash-guard watchdog on|off  toggle the watchdog only
 ```
 
-Toggles are session-scoped and persist across resume/reload/fork via session entries. The footer status line renders in the theme's dim color so it blends with pi's default footer, e.g. `⛨ bg · watch · jev`; `watch(2)` while commands are being watched, `⛨ bg · rules-only` when no Jev classifier is available, `⛨ bg · jev` with the watchdog toggled off, `⛨ watch · jev` with the guard off, and `⛨ off` when disabled. A bash-override conflict appends a warning-colored `· ⚠ bash conflict`. `/bash-guard status` shows the resolved provider/model, the enable hint when off, and session classifier usage. `pi --no-bash-guard` disables both for one run.
+Toggles are session-scoped and persist across resume/reload/fork via session entries. `/bash-guard status` shows the resolved provider/model, the enable hint when off, the last classifier failure, session guard decisions, and session classifier usage. `pi --no-bash-guard` disables both for one run.
+
+### Footer status
+
+The footer line is dim so it blends with pi's footer. Problems use the warning color.
+
+```
+⛨ BG                          healthy, no risky command judged yet
+⛨ BG 4✓ 1? 1✗                 risky commands this session: passed by Jev, asked and allowed, blocked
+⛨ BG ⏱ 3:10 progressing .92   a watched command is running: elapsed time, latest Jev verdict and probability
+⛨ BG ⏱ 7:05 stuck .88 kill 1/2  1 of 2 consecutive confident stuck/looping checks needed to kill (agreeChecks)
+⛨ BG ⏱ 12:00 service          judged a long-lived service, so it won't be killed
+⛨ BG ⏱2 7:05 waiting .81      2 commands running, showing the oldest
+⛨ BG rules-only · 2?          no Jev classifier; the watchdog is inert
+⛨ BG jev ✗ timeout · 4✓       the last Jev call failed; clears on the next success
+⛨ BG guard-only · 4✓          watchdog toggled off (watch-only when the guard is off)
+⛨ BG ⚠ bash conflict · 4✓     another extension owns the bash override
+⛨ BG off                      both off, or --no-bash-guard
+```
+
+The tally counts only commands that matched a risky rule. Zero buckets are hidden, and the counts reset with each session. While commands run, the clock ticks every second and replaces the tally.
 
 ## Configuration
 

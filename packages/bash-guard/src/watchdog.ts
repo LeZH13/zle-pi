@@ -49,6 +49,25 @@ export interface WatchCheckRecord {
 	outcome: string;
 }
 
+/** Live view of the longest-running watched command, for the footer. */
+export interface WatchLive {
+	/** Commands currently watched. */
+	running: number;
+	/** Seconds since the longest-running command started. */
+	elapsedSeconds: number;
+	/** Its latest Jev answer; unset before the first check or after a failed one. */
+	check?: {
+		status: WatchdogStatus;
+		/** Probability of the chosen status. */
+		p: number;
+		/** Consecutive kill-worthy checks so far, and how many trigger a kill. */
+		agree: number;
+		agreeNeeded: number;
+		/** Judged a legitimate long-lived service, so the kill was vetoed. */
+		service: boolean;
+	};
+}
+
 /** Records kept per command, and commands kept in the log map. */
 const MAX_CHECKS_PER_COMMAND = 10;
 const MAX_LOGGED_COMMANDS = 40;
@@ -66,6 +85,7 @@ interface Entry {
 	killReason?: string;
 	steered: boolean;
 	agreeCount: number;
+	lastCheck?: WatchLive["check"];
 	timer?: ReturnType<typeof setTimeout>;
 	checkAbort?: AbortController;
 	abort: () => void;
@@ -157,6 +177,17 @@ export class Watchdog {
 		return this.entries.size;
 	}
 
+	/** The longest-running watched command, or undefined when none runs. */
+	live(): WatchLive | undefined {
+		const oldest = this.entries.values().next().value; // Map keeps start order
+		if (!oldest) return undefined;
+		return {
+			running: this.entries.size,
+			elapsedSeconds: Math.max(0, Math.floor((this.deps.now() - oldest.startedAt) / 1000)),
+			...(oldest.lastCheck ? { check: oldest.lastCheck } : {}),
+		};
+	}
+
 	/** Whether the watchdog killed this command's process. */
 	isKilled(handle: WatchdogHandle): boolean {
 		return this.entries.get(handle.id)?.killed ?? false;
@@ -209,6 +240,15 @@ export class Watchdog {
 	private async check(entry: Entry): Promise<void> {
 		const elapsed = (): number => Math.max(0, Math.round((this.deps.now() - entry.startedAt) / 1000));
 		const record = (outcome: string, answer?: WatchdogJevAnswer): void => {
+			entry.lastCheck = answer
+				? {
+						status: answer.status,
+						p: answer.pStatus,
+						agree: entry.agreeCount,
+						agreeNeeded: this.deps.config.watchdog.agreeChecks,
+						service: outcome === "veto",
+					}
+				: undefined;
 			const checks = this.logs.get(entry.command);
 			if (!checks) return;
 			checks.push({

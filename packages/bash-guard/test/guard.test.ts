@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.js";
-import { runGuard, SELECT_OPTIONS, type GuardDeps, type GitInfo } from "../src/guard.js";
+import { formatGuardScore, runGuard, SELECT_OPTIONS, type GuardDeps, type GitInfo } from "../src/guard.js";
 import type { GuardJevResult, Jev } from "../src/jev.js";
 import { RISKY_RULES } from "../src/rules.js";
 
@@ -24,6 +24,7 @@ function makeJev(result: GuardJevResult): Jev & { guardCalls: number } {
 			throw new Error("not used in guard tests");
 		},
 		usage: () => ({ input: 0, output: 0, totalTokens: 0, cost: 0 }),
+		lastFailure: undefined,
 		get guardCalls() {
 			return guardCalls;
 		},
@@ -127,6 +128,7 @@ describe("guard decision flow", () => {
 				throw new Error("not used in guard tests");
 			},
 			usage: () => ({ input: 0, output: 0, totalTokens: 0, cost: 0 }),
+			lastFailure: undefined,
 		};
 		const deps = makeDeps({ jev: unavailable });
 		const first = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
@@ -153,6 +155,7 @@ describe("guard decision flow", () => {
 			},
 			describeUnavailable: () => "",
 			usage: () => ({ input: 0, output: 0, totalTokens: 0, cost: 0 }),
+			lastFailure: undefined,
 			async guardAnswer(state) {
 				captured = state;
 				return { ok: true, p: 0.05, model: "t" };
@@ -180,6 +183,7 @@ describe("guard decision flow", () => {
 			},
 			describeUnavailable: () => "",
 			usage: () => ({ input: 0, output: 0, totalTokens: 0, cost: 0 }),
+			lastFailure: undefined,
 			async guardAnswer(state) {
 				captured = state;
 				return { ok: true, p: 0.05, model: "t" };
@@ -227,5 +231,57 @@ describe("guard decision flow", () => {
 		const deps = makeDeps({ jev, risky: { rules: RISKY_RULES, extra: [], allow: [/^git push --force origin main$/] } });
 		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
 		expect(outcome).toEqual({ action: "allow", reason: "matched an allow pattern" });
+	});
+});
+
+describe("jev score on allowed outcomes", () => {
+	it("attaches the below-threshold Jev score to the allow outcome", async () => {
+		const jev = makeJev({ ok: true, p: 0.31, model: "t" });
+		const outcome = await runGuard(makeDeps({ jev }), { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome).toMatchObject({ action: "allow", jev: { p: 0.31, userApproved: false } });
+	});
+
+	it("attaches a user-approved score when the dialog allows once", async () => {
+		const jev = makeJev({ ok: true, p: 0.9, model: "t" });
+		const deps = makeDeps({ jev, select: vi.fn(async () => "Allow once") });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome).toMatchObject({ action: "allow", jev: { p: 0.9, userApproved: true } });
+	});
+
+	it("attaches a user-approved score when the dialog allows for the session", async () => {
+		const jev = makeJev({ ok: true, p: 0.9, model: "t" });
+		const deps = makeDeps({ jev, select: vi.fn(async () => "Allow for this session") });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome).toMatchObject({ action: "allow", jev: { p: 0.9, userApproved: true } });
+	});
+
+	it("carries no score on a blocked outcome", async () => {
+		const jev = makeJev({ ok: true, p: 0.9, model: "t" });
+		const outcome = await runGuard(makeDeps({ jev }), { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome.action).toBe("block");
+		expect("jev" in outcome).toBe(false);
+	});
+});
+
+describe("formatGuardScore", () => {
+	it("labels Jev passes as recoverable and user approvals distinctly", () => {
+		expect(formatGuardScore({ p: 0.31, userApproved: false })).toBe("jev p=0.31 recoverable");
+		expect(formatGuardScore({ p: 0.604, userApproved: true })).toBe("jev p=0.60 allowed by user");
+	});
+});
+
+describe("guard verdicts for the footer tally", () => {
+	it("tags passed, asked, and blocked decisions only", async () => {
+		const pass = await runGuard(makeDeps({ jev: makeJev({ ok: true, p: 0.1, model: "t" }) }), { command: RISKY_COMMAND, cwd: "/w" });
+		expect(pass.verdict).toBe("passed");
+		const ask = await runGuard(makeDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }), select: vi.fn(async () => "Allow once") }), {
+			command: RISKY_COMMAND,
+			cwd: "/w",
+		});
+		expect(ask.verdict).toBe("asked");
+		const block = await runGuard(makeDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }) }), { command: RISKY_COMMAND, cwd: "/w" });
+		expect(block.verdict).toBe("blocked");
+		const safe = await runGuard(makeDeps({ jev: makeJev({ ok: true, p: 0.1, model: "t" }) }), { command: SAFE_COMMAND, cwd: "/w" });
+		expect(safe.verdict).toBeUndefined();
 	});
 });

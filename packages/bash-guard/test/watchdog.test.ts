@@ -38,6 +38,7 @@ function fakeJev(script: JevScript | WatchdogJevResult): Jev & { states: unknown
 			};
 		},
 		usage: () => ({ input: 0, output: 0, totalTokens: 0, cost: 0 }),
+		lastFailure: undefined,
 		states,
 	};
 }
@@ -363,6 +364,7 @@ describe("watchdog unavailable Jev", () => {
 				throw new Error("checks must not ask Jev while unavailable");
 			},
 			usage: () => ({ input: 0, output: 0, totalTokens: 0, cost: 0 }),
+			lastFailure: undefined,
 		};
 		const watchdog = new Watchdog({
 			config,
@@ -376,5 +378,32 @@ describe("watchdog unavailable Jev", () => {
 		// Without a classifier the checks are neutral and never ask Jev.
 		expect(abort).not.toHaveBeenCalled();
 		void entry;
+	});
+});
+
+describe("watchdog live view", () => {
+	it("reports the oldest running command's clock and latest check", async () => {
+		const h = setup({ status: "stuck", pStatus: 0.9, persistent: 0 });
+		expect(h.watchdog.live()).toEqual({ running: 1, elapsedSeconds: 0 });
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(h.watchdog.live()).toEqual({
+			running: 1,
+			elapsedSeconds: FIRST_MS / 1000,
+			check: { status: "stuck", p: 0.9, agree: 1, agreeNeeded: 2, service: false },
+		});
+		h.watchdog.start("second", "/w", { abort: vi.fn() });
+		expect(h.watchdog.live()?.running).toBe(2);
+		expect(h.watchdog.live()?.elapsedSeconds).toBe(FIRST_MS / 1000);
+		h.watchdog.dispose();
+		expect(h.watchdog.live()).toBeUndefined();
+	});
+
+	it("marks a vetoed service and drops the check after a failure", async () => {
+		const h = setup({ status: "stuck", pStatus: 0.9, persistent: 0.9 });
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(h.watchdog.live()?.check).toMatchObject({ service: true, agree: 0 });
+		const failing = setup({ ok: false, reason: "timeout" });
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(failing.watchdog.live()?.check).toBeUndefined();
 	});
 });
