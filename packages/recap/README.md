@@ -111,7 +111,7 @@ All settings are optional:
 | `prompts.recap` | Built-in | Replace the recap system prompt |
 | `prompts.name` | Built-in | Replace the naming system prompt |
 
-Word and turn limits must be positive safe integers. Invalid values use their defaults. Title length stays fixed at 60 code points. Prompt overrides should request one plain-text content line; validation and length caps still apply. Output cleanup strips trailing periods but preserves trailing `?` and `!`, so a recap may end with an open question.
+Word and turn limits must be positive safe integers. Invalid values use their defaults. Title length stays fixed at 60 code points. Prompt overrides should request one plain-text content line; validation and length caps still apply. Recaps keep the model's trailing punctuation (`.`, `?`, `!`), so a recap may end with an open question; session titles strip trailing periods.
 
 For example, disable automatic naming and use a custom naming prompt for explicit `/autoname` calls:
 

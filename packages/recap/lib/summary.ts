@@ -75,7 +75,7 @@ export function cleanLine(line: string): string {
 		.replace(/`/g, "")
 		.replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
 		.replace(/^['"“”‘’]+|['"“”‘’]+$/g, "")
-		.replace(/\s+/g, " ").trim().replace(/[.。]+$/, "");
+		.replace(/\s+/g, " ").trim();
 }
 
 export function cleanOutput(text: string, kind: "recap" | "name", maxWords: number): string {
@@ -84,7 +84,10 @@ export function cleanOutput(text: string, kind: "recap" | "name", maxWords: numb
 	const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
 		.filter(line => !/^#+\s*/.test(line)).map(cleanLine).filter(Boolean);
 	if (lines.length !== 1) throw new Error("Expected one nonempty plain-text line");
-	const line = lines[0];
+	const line = kind === "name"
+		// Titles are noun phrases; a trailing period reads as a defect, unlike in recaps.
+		? lines[0].replace(/[.。]+$/, "")
+		: lines[0];
 	if (kind === "name") {
 		const chars = Array.from(line);
 		if (chars.length <= TITLE_MAX_CHARS) return line;

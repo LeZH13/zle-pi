@@ -40,16 +40,20 @@ describe("output validation and cleanup", () => {
 		expect(extractText({ type: "text", text: "not an array" })).toBe("");
 	});
 	it.each([
-		["- **Build** `widgets`!", "Build widgets!"], ["1. Fix [routing](https://example.test).", "Fix routing"],
-		["※ recap: Fix tests。", "Fix tests"], ["Title: “修复测试！”", "修复测试！"],
+		["- **Build** `widgets`!", "Build widgets!"], ["1. Fix [routing](https://example.test).", "Fix routing."],
+		["※ recap: Fix tests。", "Fix tests。"], ["Title: “修复测试！”", "修复测试！"],
 		["Here's the recap: Done?!", "Done?!"], ["\u001b[31mSession name: Plain\u001b[0m\u0007", "Plain"],
 		["# Heading", "Heading"], ["• Work   on  tests", "Work on tests"],
 	])("cleans %j", (input, expected) => expect(cleanLine(input)).toBe(expected));
 	it("accepts a single content line with removable heading and collapses CRLF/whitespace", () => {
-		expect(cleanOutput("\r\n# Heading\r\n  Recap: **Fix**   tests. \r\n", "recap", 40)).toBe("Fix tests");
+		expect(cleanOutput("\r\n# Heading\r\n  Recap: **Fix**   tests. \r\n", "recap", 40)).toBe("Fix tests.");
 	});
 	it.each(["", " \n ", "# Heading", "first\nsecond", "{\"title\":\"wrong\"}", "[\"wrong\"]", "x".repeat(4001), "\u001b[31m\u001b[0m"])("rejects malformed output %j", input => {
 		expect(() => cleanOutput(input, "name", 40)).toThrow();
+	});
+	it("strips trailing periods from titles but keeps recap punctuation", () => {
+		expect(cleanOutput("Fix the login bug.", "name", 40)).toBe("Fix the login bug");
+		expect(cleanOutput("Fix the login bug?", "name", 40)).toBe("Fix the login bug?");
 	});
 	it("caps recaps by words and titles by Unicode code points without surrogate splitting", () => {
 		expect(cleanOutput("one two three four", "recap", 3)).toBe("one two three…");
