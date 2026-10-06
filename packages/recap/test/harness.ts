@@ -31,12 +31,17 @@ export function setup(options: { settings?: unknown; manager?: SessionManager; m
 	let idle = true;
 	const notify = vi.fn();
 	const setWidget = vi.fn();
+	const terminalListeners = new Set<(data: string) => unknown>();
+	const onTerminalInput = vi.fn((handler: (data: string) => unknown) => {
+		terminalListeners.add(handler);
+		return () => terminalListeners.delete(handler);
+	});
 	const streamSimple = vi.fn(() => ({ result: () => Promise.resolve(response("Generated session summary")) }));
 	const registry = { streamSimple, find: vi.fn(() => model), hasConfiguredAuth: vi.fn(() => true) };
 	const ctx = {
 		mode: options.mode ?? "tui", hasUI: options.hasUI ?? true,
 		model, modelRegistry: registry, sessionManager: manager,
-		isIdle: () => idle, ui: { notify, setWidget },
+		isIdle: () => idle, ui: { notify, setWidget, onTerminalInput },
 	} as unknown as ExtensionContext;
 	const appendEntry = vi.fn((key: string, data: unknown) => manager.appendCustomEntry(key, data));
 	const setSessionName = vi.fn((name: string) => {
@@ -52,7 +57,9 @@ export function setup(options: { settings?: unknown; manager?: SessionManager; m
 	recapExtension(pi);
 	const emit = async (name: string, event: any = {}) => { await handlers.get(name)?.(event, ctx); };
 	return {
-		ctx, pi, handlers, commands, notify, setWidget, streamSimple, registry, appendEntry, setSessionName,
+		ctx, pi, handlers, commands, notify, setWidget, streamSimple, registry, appendEntry, setSessionName, onTerminalInput,
+		terminal(data: string) { for (const listener of terminalListeners) listener(data); },
+		get terminalListenerCount() { return terminalListeners.size; },
 		get manager() { return manager; },
 		settings(value: unknown) { settings = value; },
 		idle(value: boolean) { idle = value; },
@@ -63,9 +70,11 @@ export function setup(options: { settings?: unknown; manager?: SessionManager; m
 		user(text = "Build a coding feature") { return manager.appendMessage({ role: "user", content: text, timestamp: 1 }); },
 		assistant(stopReason = "stop") { appendAssistant(manager, stopReason); },
 		async run(outcome = "completed") {
+			idle = false;
 			await emit("agent_start");
 			if (outcome === "completed" && manager.buildSessionProjection().messages.at(-1)?.role !== "assistant") appendAssistant(manager);
 			await emit("agent_before_settle", { outcome });
+			idle = true;
 			await emit("agent_settled");
 			await flush();
 		},

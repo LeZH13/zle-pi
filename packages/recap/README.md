@@ -38,7 +38,7 @@ Then restart Pi or reload extensions. Previous upstream recap metadata is not mi
 
 ### Recaps: current progress
 
-After three user prompts, a short recap appears **above the input editor**:
+After at least three user prompts and **two uninterrupted minutes of idle time** following a successfully completed agent run, a short recap appears **above the input editor**:
 
 ```text
 ※ recap: OAuth callback validation fixed and tests pass. Next, get review sign-off before merging.
@@ -46,9 +46,13 @@ After three user prompts, a short recap appears **above the input editor**:
 
 The recap is one short sentence on the goal and current state, followed by a brief next-step tip — or one open question when no clear next step follows from the conversation.
 
-Automatic recap generation runs after the agent has fully settled, with no pending automatic retry or continuation, and only for completed responses. It refreshes every three completed agent runs by default. Unchanged input skips generation; substantially similar automatic results keep the displayed text stable.
+Automatic generation is armed only after a successful, fully settled response: no pending tools, automatic retries, or continuations. Tools awaiting your answer or a bash-guard approval are still busy and do not count as idle. An assistant's final text asking a question does count as settled.
 
-`/recap` regenerates immediately, bypassing the prompt threshold, cooldown, and similarity suppression. Successful recaps survive reloads, resume, and forks, following the active branch. Cooldown counters are persisted with the recap state. Automatic failed attempts observe the cooldown too; a manual refresh can retry sooner.
+Typing, pasting, and other terminal interaction reset the countdown without consuming your input; terminal capability replies and focus reports do not. Activity during recap generation cancels that request and starts a new idle countdown when the conversation remains eligible.
+
+New work hides the previous recap immediately. A recap is shown only while idle and when its conversation fingerprint matches the active branch. Restored recaps are checked the same way on reload, resume, and tree navigation. New activity cancels pending generation; late results cannot overwrite current state. A small animated **Generating recap…** badge appears only while a recap request is running, not during the idle countdown. Fresh results always use the newly generated wording.
+
+`/recap` regenerates immediately while idle, bypassing the prompt threshold and idle delay. A failed automatic request is not repeatedly retried during the same idle period; another successful run can schedule a new attempt, or `/recap` can retry immediately.
 
 The recap is a UI widget and non-context session metadata. It is **not compaction** and does not inject itself into future model context.
 
@@ -91,8 +95,7 @@ All settings are optional:
     "model": "provider/model-id",
     "maxWords": 50,
     "minTurns": 3,
-    "cooldownTurns": 3,
-    "similarityThreshold": 0.7,
+    "idleDelaySeconds": 120,
     "placement": "above",
     "autoName": true
   }
@@ -104,14 +107,13 @@ All settings are optional:
 | `model` | Active session model | Shared model for recap and naming. Prefer a full `provider/model-id`; a bare ID resolves against the current session model's provider. |
 | `maxWords` | `50` | Maximum whitespace-separated words in a recap; longer model output is trimmed to this many words with an appended … |
 | `minTurns` | `3` | User messages required before the first automatic recap |
-| `cooldownTurns` | `3` | Completed agent runs between automatic recap attempts; does not delay the first eligible recap |
-| `similarityThreshold` | `0.7` | Word-set Jaccard overlap at or above which an automatic result retains the displayed recap; between 0 and 1 |
+| `idleDelaySeconds` | `120` | Uninterrupted idle seconds after a successful settled run before automatic generation |
 | `placement` | `"above"` | `"above"` or `"below"` the editor; above leaves the custom footer area alone |
 | `autoName` | `true` | Enable initial automatic naming; `/autoname` remains available when false |
 | `prompts.recap` | Built-in | Replace the recap system prompt |
 | `prompts.name` | Built-in | Replace the naming system prompt |
 
-Word and turn limits must be positive safe integers. Invalid values use their defaults. Title length stays fixed at 60 code points. Prompt overrides should request one plain-text content line; validation and length caps still apply. Recaps keep the model's trailing punctuation (`.`, `?`, `!`), so a recap may end with an open question; session titles strip trailing periods.
+Word, prompt-count, and idle-delay limits must be positive safe integers. `cooldownTurns` and `similarityThreshold` have been removed; replace turn-based cadence with `idleDelaySeconds`. Idle delays must not exceed 2,147,483 seconds (Node's timer limit). Invalid values use their defaults. Title length stays fixed at 60 code points. Prompt overrides should request one plain-text content line; validation and length caps still apply. Recaps keep the model's trailing punctuation (`.`, `?`, `!`), so a recap may end with an open question; session titles strip trailing periods.
 
 For example, disable automatic naming and use a custom naming prompt for explicit `/autoname` calls:
 
@@ -133,13 +135,13 @@ If `model` is unset or blank, both features use the active session model without
 - Print, JSON, and RPC modes perform no generation, naming, widget updates, or metadata writes.
 - When `PI_SUBAGENT_ID` or `PI_SUBAGENT_SESSION` is nonblank, the extension registers nothing. This leaves `pi-interactive-subagents` child session names alone, including interactive children and resumed children.
 - Only one recap/title side-call runs at a time. Initial naming and recap generation have separate schedules and prompts, but share their model and bounded context extraction.
-- Requests are cancelled on a new agent run, session replacement, tree navigation, reload, or shutdown. Session/run identity and conversation snapshot checks prevent stale writes even if a provider ignores cancellation.
-- Summary inputs use the original goal, up to three recent conversation rounds, and a bounded current context summary. Context edits, compaction, and the active branch are respected; abandoned raw paths, thinking blocks, images, and tool-result bodies are not sent.
+- Requests are cancelled on new submitted input, a user shell command, a new agent run, session replacement, tree navigation, reload, or shutdown; recap requests also cancel on terminal activity. Session/run identity and conversation snapshot checks prevent stale writes even if a provider ignores cancellation.
+- Summary inputs prioritize the latest exchange, with smaller excerpts from earlier rounds, the original goal, and current context summary. Long excerpts retain their beginning and ending with an explicit omission marker. Bounded tool outcome/error excerpts help distinguish attempted work from verified success. Context edits, compaction, and the active branch are respected; abandoned raw paths, thinking blocks, and images are not sent. Conversation freshness is checked independently of these shortened excerpts.
 - Failed, aborted, length-capped, empty, multiline, malformed JSON-like, or excessively long responses do not replace the previous successful result. Automatic errors are deduplicated by feature and error within the session; explicit commands report failures each time.
 
 ## Privacy and cost
 
-Recap and naming generation make **additional model requests**, sending bounded conversation excerpts to the active or explicitly configured provider. A cheaper dedicated model can reduce cost. Automatic title generation normally adds one successful call per new session; automatic recaps follow the configured cadence. Side-call usage is not included in Pi's main-session usage totals by this extension.
+Recap and naming generation make **additional model requests**, sending bounded conversation excerpts to the active or explicitly configured provider. A cheaper dedicated model can reduce cost. Automatic title generation normally adds one successful call per new session; automatic recaps follow the configured idle delay. Side-call usage is not included in Pi's main-session usage totals by this extension.
 
 There are no naming/recap calls from excluded modes or subagent processes. To avoid all side-calls, do not load the package; `autoName: false` disables only automatic naming, not automatic recaps.
 

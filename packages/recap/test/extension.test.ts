@@ -5,10 +5,11 @@ import { NAMING_KEY, STATE_KEY } from "../lib/summary.js";
 import { flush, response, setup } from "./harness.js";
 
 beforeEach(() => {
+	vi.useFakeTimers();
 	vi.stubEnv("PI_SUBAGENT_ID", "");
 	vi.stubEnv("PI_SUBAGENT_SESSION", "");
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllEnvs(); });
 
 function persisted(manager: SessionManager, key: string) {
 	return manager.getBranch().filter(e => e.type === "custom" && e.customType === key).map(e => (e as any).data);
@@ -16,14 +17,14 @@ function persisted(manager: SessionManager, key: string) {
 const plainTheme = { fg: (_token: string, text: string) => text, bold: (text: string) => text, italic: (text: string) => text };
 function widget(h: ReturnType<typeof setup>, theme = plainTheme) {
 	const factory = h.setWidget.mock.calls.at(-1)?.[1];
-	return typeof factory === "function" ? factory({}, theme) : undefined;
+	return typeof factory === "function" ? factory({ requestRender: vi.fn() }, theme) : undefined;
 }
 
 describe("registration and full exclusions", () => {
 	it("registers only its two commands and supported lifecycle events", () => {
 		const h = setup();
 		expect([...h.commands.keys()]).toEqual(["recap", "autoname"]);
-		expect([...h.handlers.keys()]).toEqual(["session_start", "agent_start", "agent_before_settle", "agent_settled", "session_info_changed", "session_before_tree", "session_tree", "session_shutdown"]);
+		expect([...h.handlers.keys()]).toEqual(["session_start", "input", "user_bash", "agent_start", "agent_before_settle", "agent_settled", "session_info_changed", "session_before_tree", "session_tree", "session_shutdown"]);
 	});
 	it.each(["PI_SUBAGENT_ID", "PI_SUBAGENT_SESSION"])("fully disables registration for %s", key => {
 		vi.stubEnv(key, " child-123 ");
@@ -69,12 +70,12 @@ describe("initial automatic session naming", () => {
 		await h.emit("agent_settled");
 		await flush();
 		expect(h.setSessionName).toHaveBeenCalledTimes(1);
-		expect(h.state().completedRuns).toBe(1);
+		expect(h.state()).toBeUndefined();
 		await h.emit("agent_settled"); // duplicate notification is not a second run
 		h.user("Continue");
 		await h.run();
 		expect(h.setSessionName).toHaveBeenCalledTimes(1);
-		expect(h.state().completedRuns).toBe(2);
+		expect(h.state()).toBeUndefined();
 		expect(persisted(h.manager, NAMING_KEY).at(-1).eligible).toBe(false);
 	});
 	it.each(["aborted", "error"])("does not count or name %s runs, retries after later success", async outcome => {
@@ -87,7 +88,7 @@ describe("initial automatic session naming", () => {
 		h.answer("Successful title");
 		await h.run();
 		expect(h.manager.getSessionName()).toBe("Successful title");
-		expect(h.state().completedRuns).toBe(1);
+		expect(h.state()).toBeUndefined();
 	});
 	it.each(["length", "error", "aborted", "toolUse"])("ignores completed outcomes with unfinished main assistant stop reason %s", async stopReason => {
 		const h = setup(); await h.start(); h.user(); h.user(); h.user();
@@ -97,7 +98,7 @@ describe("initial automatic session naming", () => {
 		expect(h.state()).toBeUndefined();
 		h.assistant("stop"); await h.run();
 		expect(h.setSessionName).toHaveBeenCalledTimes(1);
-		expect(h.state().completedRuns).toBe(1);
+		expect(h.state()).toBeUndefined();
 	});
 	it("ignores a completed outcome with no assistant response", async () => {
 		const h = setup(); await h.start(); h.user();
@@ -190,13 +191,12 @@ describe("forced commands and configured shared model", () => {
 		expect(h.manager.getSessionName()).toBe("New subject");
 		expect(h.notify).toHaveBeenLastCalledWith("Session named: New subject", "info");
 	});
-	it("recap ignores prompt threshold, unchanged input, cooldown and similarity when forced", async () => {
-		const h = setup({ settings: { recap: { autoName: false, minTurns: 99, cooldownTurns: 99, similarityThreshold: 0 } } });
+	it("recap ignores prompt threshold, unchanged input and idle delay when forced", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 99, idleDelaySeconds: 999 } } });
 		await h.start(); h.user();
 		h.answer("First recap"); await h.command("recap");
 		h.answer("Second recap"); await h.command("recap");
-		expect(h.state()).toMatchObject({ recap: "Second recap", completedRuns: 0 });
-		expect(h.state().lastAutoUpdateAt).toBeUndefined();
+		expect(h.state()).toMatchObject({ recap: "Second recap" });
 		expect(h.streamSimple).toHaveBeenCalledTimes(2);
 		expect(widget(h).render(100).join("")).toContain("Second recap");
 	});
@@ -232,7 +232,7 @@ describe("forced commands and configured shared model", () => {
 		expect(calls[0][0]).toBe(configured);
 		expect(calls[0][1].systemPrompt).toBe("Recap safely");
 		expect(calls[1][1].systemPrompt).toBe("Name safely");
-		expect(calls[0][1].messages[0].content[0].text.length).toBeLessThan(1000);
+		expect(calls[0][1].messages[0].content[0].text.length).toBeLessThan(10000);
 		expect(calls[0][2]).toMatchObject({ maxTokens: 512, cacheRetention: "none", signal: expect.any(AbortSignal) });
 		expect(h.state().recap).toBe("one two…");
 	});
@@ -248,88 +248,138 @@ describe("forced commands and configured shared model", () => {
 	});
 });
 
-describe("automatic recap scheduling and persisted branch state", () => {
-	it("waits for three user prompts then enforces three completed-run cooldown", async () => {
+describe("automatic idle recaps and branch freshness", () => {
+	it("requires three prompts and two uninterrupted idle minutes, then refreshes after each eligible run", async () => {
 		const h = setup({ settings: { recap: { autoName: false } } }); await h.start();
-		for (let i = 1; i <= 6; i++) {
-			h.user(`Prompt ${i}`);
-			if (i === 3 || i === 6) h.answer(i === 3 ? "First feature recap" : "Different second goal");
-			await h.run();
-			expect(h.streamSimple).toHaveBeenCalledTimes(i < 3 ? 0 : i < 6 ? 1 : 2);
-		}
-		expect(h.state()).toMatchObject({ completedRuns: 6, lastAutoUpdateAt: 6, recap: "Different second goal" });
-	});
-	it("allows the first recap immediately despite a long configured cooldown", async () => {
-		const h = setup({ settings: { recap: { autoName: false, minTurns: 1, cooldownTurns: 100 } } });
-		await h.start(); h.user(); h.answer("Initial recap"); await h.run();
-		expect(h.streamSimple).toHaveBeenCalledTimes(1);
-		expect(h.state()).toMatchObject({ recap: "Initial recap", completedRuns: 1, lastAutoUpdateAt: 1 });
-		h.user("Next prompt"); await h.run();
-		expect(h.streamSimple).toHaveBeenCalledTimes(1);
-	});
-	it("does not consume requests for unchanged input, skips similar updates but persists their key", async () => {
-		const h = setup({ settings: { recap: { autoName: false } } }); await h.start();
-		h.user("one"); h.user("two"); h.user("three");
-		h.answer("Build feature and add tests"); await h.run();
-		const oldKey = h.state().inputKey;
-		for (let i = 0; i < 3; i++) await h.run();
-		expect(h.streamSimple).toHaveBeenCalledTimes(1);
-		h.user("New activity"); h.answer("Add tests and build feature"); await h.run();
-		expect(h.state().recap).toBe("Build feature and add tests");
-		expect(h.state().inputKey).not.toBe(oldKey);
-		expect(h.state().lastAutoUpdateAt).toBe(5);
-		for (let i = 0; i < 3; i++) await h.run();
-		expect(h.streamSimple).toHaveBeenCalledTimes(2);
-	});
-	it("failed attempts also observe cooldown, but forced commands may immediately retry", async () => {
-		const h = setup({ settings: { recap: { autoName: false } } }); await h.start();
-		h.user(); h.user(); h.user();
-		h.answer("invalid", "error"); await h.run();
-		expect(h.state()).toMatchObject({ completedRuns: 1, lastAutoUpdateAt: 1 });
-		h.user("next"); await h.run(); await h.run();
-		expect(h.streamSimple).toHaveBeenCalledTimes(1);
-		h.answer("Recovered recap"); await h.command("recap");
-		expect(h.state().recap).toBe("Recovered recap");
-	});
-	it.each(["reload", "resume"])("restores recap, input key, and cooldown counters on %s", async reason => {
-		const original = setup({ settings: { recap: { autoName: false } } }); await original.start();
-		original.user(); original.user(); original.user(); original.answer("Stored recap"); await original.run();
-		const state = original.state();
-		const h = setup({ manager: original.manager, settings: { recap: { autoName: false } } });
-		await h.start(reason);
-		expect(widget(h).render(100).join("")).toContain("Stored recap");
-		h.user("Next task"); await h.run();
-		expect(h.state()).toMatchObject({ ...state, completedRuns: 2 });
+		for (let i = 1; i <= 2; i++) { h.user(); await h.run(); await vi.advanceTimersByTimeAsync(120000); }
 		expect(h.streamSimple).not.toHaveBeenCalled();
-		await h.run(); h.answer("Different recap subject"); await h.run();
-		expect(h.streamSimple).toHaveBeenCalledTimes(1);
-		expect(h.state().lastAutoUpdateAt).toBe(4);
+		h.user(); h.answer("First recap"); await h.run();
+		expect(widget(h)).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(119999); expect(h.streamSimple).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1); expect(h.state().recap).toBe("First recap");
+		h.user("Next work"); h.answer("Fresh wording"); await h.run();
+		expect(widget(h)).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(120000);
+		expect(h.streamSimple).toHaveBeenCalledTimes(2); expect(h.state().recap).toBe("Fresh wording");
 	});
-	it("restores only active-branch recap/counters, including branches with no recap", async () => {
-		const h = setup({ settings: { recap: { autoName: false } } }); await h.start();
-		const root = h.user("Root goal");
-		const branchA = h.manager.appendCustomEntry(STATE_KEY, { recap: "Branch A", inputKey: "A", completedRuns: 8, lastAutoUpdateAt: 7 });
-		h.manager.branch(root);
-		h.manager.appendCustomEntry(STATE_KEY, { recap: "Branch B", inputKey: "B", completedRuns: 2, lastAutoUpdateAt: 0 });
-		await h.emit("session_tree");
-		expect(widget(h).render(100).join("")).toContain("Branch B");
-		await h.run(); expect(h.state().completedRuns).toBe(3);
-		h.manager.branch(branchA); await h.emit("session_tree");
-		expect(widget(h).render(100).join("")).toContain("Branch A");
-		await h.run(); expect(h.state().completedRuns).toBe(9);
-		h.manager.branch(root); await h.emit("session_tree");
-		expect(h.setWidget).toHaveBeenLastCalledWith("zle-recap", undefined);
-		await h.run(); expect(h.state().completedRuns).toBe(1);
+	it("resets the countdown on terminal activity without consuming input", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user(); await h.run();
+		await vi.advanceTimersByTimeAsync(119000); h.terminal("a");
+		await vi.advanceTimersByTimeAsync(119000); expect(h.streamSimple).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1000); expect(h.streamSimple).toHaveBeenCalledTimes(1);
 	});
-	it("sanitizes corrupted persisted counters and ignores unrelated entries", async () => {
-		const h = setup({ settings: { recap: { autoName: false } } });
-		h.manager.appendCustomEntry(STATE_KEY, { recap: 12, inputKey: [], completedRuns: -1, lastAutoUpdateAt: Infinity });
-		h.manager.appendCustomEntry(STATE_KEY, null);
-		h.manager.appendCustomEntry("other", { recap: "Ignored", completedRuns: 50 });
-		await h.start("resume"); h.user(); await h.run();
-		expect(h.state()).toMatchObject({ completedRuns: 1 });
-		expect(h.state().lastAutoUpdateAt).toBeUndefined();
-		expect(h.state().recap).toBeUndefined();
+	it("does not reset for terminal capability replies or focus reports", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user(); await h.run();
+		await vi.advanceTimersByTimeAsync(119000); h.terminal("\x1b[I"); h.terminal("\x1b[?1;2c");
+		await vi.advanceTimersByTimeAsync(1000); expect(h.streamSimple).toHaveBeenCalledTimes(1);
+	});
+	it("cancels the old countdown when another run starts", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user(); await h.run();
+		await vi.advanceTimersByTimeAsync(119000); h.idle(false); await h.emit("agent_start");
+		await vi.advanceTimersByTimeAsync(120000); expect(h.streamSimple).not.toHaveBeenCalled();
+		h.user("New run"); await h.run(); await vi.advanceTimersByTimeAsync(120000); expect(h.streamSimple).toHaveBeenCalledTimes(1);
+	});
+	it.each(["question tool", "bash approval"])("does not count time awaiting a %s as idle", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user(); h.idle(false);
+		await h.emit("agent_start"); await h.emit("tool_execution_start");
+		await vi.advanceTimersByTimeAsync(300000); expect(h.streamSimple).not.toHaveBeenCalled();
+		h.assistant(); await h.emit("agent_before_settle", { outcome: "completed" }); h.idle(true); await h.emit("agent_settled");
+		await vi.advanceTimersByTimeAsync(119999); expect(h.streamSimple).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(1); expect(h.streamSimple).toHaveBeenCalledTimes(1);
+	});
+	it.each(["aborted", "error"])("never schedules after %s", async outcome => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user(); await h.run(outcome);
+		h.terminal("a"); await vi.advanceTimersByTimeAsync(300000); expect(h.streamSimple).not.toHaveBeenCalled();
+	});
+	it("disarms idle recap when a user shell command starts", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user(); await h.run();
+		await h.emit("user_bash", { command: "long-running-command" });
+		await vi.advanceTimersByTimeAsync(300000); expect(h.streamSimple).not.toHaveBeenCalled();
+		expect(widget(h)).toBeUndefined();
+	});
+	it("rechecks idle and conversation at the timer boundary", async () => {
+		for (const change of ["busy", "edit"]) {
+			const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); const goal = h.user(); await h.run();
+			if (change === "busy") h.idle(false); else h.manager.appendContextEdit(goal, { content: "Changed context" });
+			await vi.advanceTimersByTimeAsync(120000); expect(h.streamSimple).not.toHaveBeenCalled();
+			await h.emit("session_shutdown");
+		}
+	});
+	it("skips unchanged conversation but always uses freshly generated wording for changed input", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user();
+		h.answer("Build feature and add tests"); await h.run(); await vi.advanceTimersByTimeAsync(120000);
+		await h.run(); await vi.advanceTimersByTimeAsync(120000); expect(h.streamSimple).toHaveBeenCalledTimes(1);
+		h.user("Change"); h.answer("Add tests and build feature"); await h.run(); await vi.advanceTimersByTimeAsync(120000);
+		expect(h.state().recap).toBe("Add tests and build feature");
+	});
+	it("does not loop failed requests; manual refresh retries immediately", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user();
+		h.answer("invalid", "error"); await h.run(); await vi.advanceTimersByTimeAsync(120000);
+		await vi.advanceTimersByTimeAsync(600000); expect(h.streamSimple).toHaveBeenCalledTimes(1);
+		h.terminal("a"); await vi.advanceTimersByTimeAsync(120000); expect(h.streamSimple).toHaveBeenCalledTimes(1);
+		h.answer("Recovered"); await h.command("recap"); expect(h.state().recap).toBe("Recovered");
+		expect(vi.getTimerCount()).toBe(0);
+	});
+	it.each(["reload", "resume"])("restores only fresh recap on %s", async reason => {
+		const original = setup({ settings: { recap: { autoName: false } } }); await original.start(); const goal = original.user();
+		original.answer("Stored recap"); await original.command("recap");
+		const h = setup({ manager: original.manager }); await h.start(reason);
+		expect(widget(h).render(100).join("")).toContain("Stored recap");
+		h.manager.appendContextEdit(goal, { content: "Changed goal" }); await h.start(reason);
+		expect(widget(h)).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(300000); expect(h.streamSimple).not.toHaveBeenCalled();
+	});
+	it("hides recap during new work and restores only matching active-branch metadata", async () => {
+		const h = setup({ settings: { recap: { autoName: false } } }); await h.start(); const root = h.user("Root");
+		h.answer("Branch A"); await h.command("recap"); const branchA = h.manager.getLeafId()!;
+		h.user("Branch B"); h.answer("Branch B"); await h.command("recap"); const branchB = h.manager.getLeafId()!;
+		await h.emit("agent_start"); expect(widget(h)).toBeUndefined();
+		h.manager.branch(branchA); await h.emit("session_tree"); expect(widget(h).render(100).join("")).toContain("Branch A");
+		h.manager.branch(branchB); await h.emit("session_tree"); expect(widget(h).render(100).join("")).toContain("Branch B");
+		h.manager.branch(root); await h.emit("session_tree"); expect(widget(h)).toBeUndefined();
+	});
+	it("ignores corrupted state and never displays unvalidated old fingerprints", async () => {
+		const h = setup(); h.user();
+		h.manager.appendCustomEntry(STATE_KEY, { recap: 12, inputKey: [] });
+		h.manager.appendCustomEntry(STATE_KEY, null); h.manager.appendCustomEntry("other", { recap: "Ignored" });
+		await h.start("resume"); expect(widget(h)).toBeUndefined();
+		h.manager.appendCustomEntry(STATE_KEY, { recap: "Old stale recap", inputKey: "old" });
+		await h.start("reload"); expect(widget(h)).toBeUndefined();
+	});
+	it("shows an animated bounded badge only during generation and stops it on success", async () => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user();
+		const pending = h.pending(); await h.run(); expect(widget(h)).toBeUndefined();
+		await vi.advanceTimersByTimeAsync(120000); const component = widget(h);
+		const first = component.render(80).join(""); expect(first).toContain("Generating recap…");
+		await vi.advanceTimersByTimeAsync(80); expect(component.render(80).join("")).not.toBe(first);
+		for (const width of [1, 2, 10, 80]) for (const line of component.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		pending.resolve(response("Fresh recap")); await flush();
+		expect(widget(h).render(100).join("")).toContain("Fresh recap"); expect(vi.getTimerCount()).toBe(0);
+	});
+	it.each(["typing", "run", "shutdown"])("discards late recap and stops animation on %s", async activity => {
+		const h = setup({ settings: { recap: { autoName: false, minTurns: 1 } } }); await h.start(); h.user();
+		const pending = h.pending(); await h.run(); await vi.advanceTimersByTimeAsync(120000); widget(h);
+		if (activity === "typing") h.terminal("a"); else await h.emit(activity === "run" ? "agent_start" : "session_shutdown");
+		expect((h.streamSimple.mock.calls[0] as any)[2].signal.aborted).toBe(true);
+		pending.resolve(response("Late recap")); await flush(); expect(h.state()).toBeUndefined();
+		expect(widget(h)).toBeUndefined(); expect(vi.getTimerCount()).toBe(activity === "typing" ? 1 : 0);
+		await h.emit("session_shutdown"); expect(vi.getTimerCount()).toBe(0); expect(h.terminalListenerCount).toBe(0);
+	});
+	it("caches projection across renders and typing but invalidates it for context edits", async () => {
+		const h = setup({ settings: { recap: { autoName: false } } }); await h.start(); const goal = h.user();
+		h.answer("Current recap"); await h.command("recap");
+		const component = widget(h); component.render(80);
+		const projection = vi.spyOn(h.manager, "buildSessionProjection");
+		for (let i = 0; i < 10; i++) { component.render(80); h.terminal("a"); }
+		expect(projection).not.toHaveBeenCalled();
+		h.manager.appendContextEdit(goal, { content: "New goal" });
+		expect(component.render(80)).toEqual([]); expect(projection).toHaveBeenCalledTimes(1);
+		projection.mockRestore();
+	});
+	it("removes input subscriptions on reload and shutdown", async () => {
+		const h = setup(); await h.start(); expect(h.terminalListenerCount).toBe(1);
+		await h.start("reload"); expect(h.terminalListenerCount).toBe(1);
+		await h.emit("session_shutdown"); await h.emit("session_shutdown"); expect(h.terminalListenerCount).toBe(0);
 	});
 });
 
@@ -365,6 +415,14 @@ describe("stale-write and cancellation guards", () => {
 			expect(h.state()).toBeUndefined();
 			expect(h.notify.mock.calls.some(([text]) => text.includes("failed") || text.includes("updated") || text.includes("Session named:"))).toBe(false);
 		}
+	});
+	it("discards an in-flight result when only omitted middle context changes", async () => {
+		const h = setup(); await h.start(); const prefix = "start ".repeat(400); const suffix = " end".repeat(400);
+		const goal = h.user(prefix + "old decision" + suffix); h.assistant();
+		const pending = h.pending(); const job = h.command("recap");
+		h.manager.appendContextEdit(goal, { content: prefix + "new decision" + suffix });
+		pending.resolve(response("Obsolete recap")); await job;
+		expect(h.state()).toBeUndefined(); expect(widget(h)).toBeUndefined();
 	});
 	it("silently discards provider errors for a changed context", async () => {
 		const h = setup(); await h.start(); const goal = h.user();
@@ -408,6 +466,8 @@ describe("stale-write and cancellation guards", () => {
 		expect(h.streamSimple).toHaveBeenCalledTimes(1);
 		name.resolve(response("Automatic title")); await flush();
 		expect(h.setSessionName).toHaveBeenCalledWith("Automatic title");
+		expect(h.streamSimple).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(120000);
 		expect(h.streamSimple).toHaveBeenCalledTimes(2);
 		recap.resolve(response("Automatic recap")); await flush();
 		expect(h.state().recap).toBe("Automatic recap");
@@ -533,6 +593,6 @@ describe("response failures and UI rendering", () => {
 		pending.resolve(response("Independent recap")); await aJob;
 		expect(a.state().recap).toBe("Independent recap");
 		expect(a.manager.getSessionName()).toBeUndefined();
-		expect(b.state().recap).toBeUndefined();
+		expect(b.state()).toBeUndefined();
 	});
 });
