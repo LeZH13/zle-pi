@@ -46,11 +46,13 @@ After at least three user prompts and **two uninterrupted minutes of idle time**
 
 The recap is one short sentence on the goal and current state, followed by a brief next-step tip — or one open question when no clear next step follows from the conversation.
 
+The three-prompt minimum is a session threshold, not a recurring cooldown. Once reached, every successful settled run with changed conversation input can arm a new idle countdown.
+
 Automatic generation is armed only after a successful, fully settled response: no pending tools, automatic retries, or continuations. Tools awaiting your answer or a bash-guard approval are still busy and do not count as idle. An assistant's final text asking a question does count as settled.
 
 Typing, pasting, and other terminal interaction reset the countdown without consuming your input; terminal capability replies and focus reports do not. Activity during recap generation cancels that request and starts a new idle countdown when the conversation remains eligible.
 
-New work hides the previous recap immediately. A recap is shown only while idle and when its conversation fingerprint matches the active branch. Restored recaps are checked the same way on reload, resume, and tree navigation. New activity cancels pending generation; late results cannot overwrite current state. A small animated **Generating recap…** badge appears only while a recap request is running, not during the idle countdown. Fresh results always use the newly generated wording.
+New work hides the previous recap immediately. A recap is shown only while idle and when its conversation fingerprint matches the active branch. Restored recaps are checked the same way on reload, resume, and tree navigation. New activity cancels pending generation; late results cannot overwrite current state. A small animated **Generating recap…** badge appears only while a recap request is running, not during the idle countdown. The badge is the sole generation indicator, including for `/recap`; no duplicate start notification is shown. Fresh results always use the newly generated wording.
 
 `/recap` regenerates immediately while idle, bypassing the prompt threshold and idle delay. A failed automatic request is not repeatedly retried during the same idle period; another successful run can schedule a new attempt, or `/recap` can retry immediately.
 

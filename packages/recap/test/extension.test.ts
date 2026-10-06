@@ -210,6 +210,16 @@ describe("forced commands and configured shared model", () => {
 		expect(h.notify).toHaveBeenLastCalledWith("No conversation yet", "warning");
 		expect(h.streamSimple).not.toHaveBeenCalled();
 	});
+	it("uses only the animated badge while a manual recap is generating", async () => {
+		const h = setup(); await h.start(); h.user();
+		const pending = h.pending(); const job = h.command("recap");
+		expect(widget(h).render(80).join("")).toContain("Generating recap…");
+		expect(h.notify).not.toHaveBeenCalled();
+		pending.resolve(response("Fresh recap")); await job;
+		expect(h.notify).toHaveBeenCalledTimes(1);
+		expect(h.notify).toHaveBeenLastCalledWith("Recap updated", "info");
+		expect(vi.getTimerCount()).toBe(0);
+	});
 	it("declines both commands during pending summary without aborting the request", async () => {
 		const h = setup(); await h.start(); h.user();
 		const pending = h.pending(); const command = h.command("recap");

@@ -335,7 +335,7 @@ export default function recapExtension(pi: ExtensionAPI) {
 					ctx.ui.notify("Agent or summary generation is busy; retry once idle", "warning");
 					return;
 				}
-				ctx.ui.notify(kind === "name" ? "Generating session name…" : "Generating recap…", "info");
+				if (kind === "name") ctx.ui.notify("Generating session name…", "info");
 				const outcome = await generate(kind, ctx, true);
 				if (outcome.kind === "updated") ctx.ui.notify(kind === "name" ? `Session named: ${pi.getSessionName()}` : "Recap updated", "info");
 				else if (outcome.kind === "skipped") ctx.ui.notify(outcome.reason, "warning");
