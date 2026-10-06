@@ -329,6 +329,33 @@ describe("pi-footer extension", () => {
 			footer.dispose();
 		});
 
+		it("joins multiple external statuses with a dimmed pipe separator", async () => {
+			const { start } = setupFooter();
+			const factory = await start({
+				getContextUsage: () => ({ tokens: 1000, contextWindow: 100_000, percent: 1 }),
+			});
+
+			const footer = factory(
+				{ requestRender() {} },
+				{ fg: (_c: string, text: string) => text },
+				{
+					getGitBranch: () => "main",
+					// Map order is non-alphabetical to prove statuses sort by extension name
+					getExtensionStatuses: () =>
+						new Map([
+							["zeta-ext", "second-status"],
+							["alpha-ext", "first-status"],
+						]),
+					onBranchChange: () => () => {},
+				},
+			);
+
+			const line3 = stripTerminalSequences(footer.render(100)[2]!);
+			expect(line3).toContain("first-status | second-status");
+			expect(line3).toContain("◷ 0s");
+			footer.dispose();
+		});
+
 		it("renders an em dash context segment when no model context window is available", async () => {
 			const { start } = setupFooter();
 			const factory = await start({

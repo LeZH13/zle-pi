@@ -88,7 +88,7 @@ custom-extension-status                                                ◷ 16m 2
   - Automatically adapts across dark, light, and custom user themes.
 
 ### Line 3: External Statuses & Active Agent Timer
-- **Left:** Preserves any statuses set by other extensions via `ctx.ui.setStatus(...)` (excluding Codex which is promoted to Line 1). Producer ANSI styles, glyphs, and spacing are preserved.
+- **Left:** Preserves any statuses set by other extensions via `ctx.ui.setStatus(...)` (excluding Codex which is promoted to Line 1). Producer ANSI styles, glyphs, and spacing are preserved. Multiple statuses are sorted by extension name and separated by a dimmed `|`.
 - **Right:** Active agent work timer `◷ <duration>`:
   - Tracks cumulative execution time spent actively running agent turns (`agent_start` → `agent_settled`).
   - Automatically pauses during interactive user prompts (`ui_prompt_start` / `ui_prompt_end`).

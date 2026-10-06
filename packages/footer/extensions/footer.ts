@@ -880,7 +880,7 @@ export default function footerExtension(pi: ExtensionAPI): void {
 					const elapsed =
 						activeMilliseconds + (activeStartedAt === undefined ? 0 : performance.now() - activeStartedAt);
 					const runtimeStr = theme.fg("dim", `◷ ${formatDuration(elapsed)}`);
-					const externalJoined = externalStatuses.join(" ");
+					const externalJoined = externalStatuses.join(theme.fg("dim", " | "));
 					const line3 = alignRightReserved(externalJoined, runtimeStr, width, ellipsis);
 
 					return [line1, line2, line3];
