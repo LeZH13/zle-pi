@@ -32,7 +32,7 @@ Renders a terminal prompt-like Line 1 styled after Starship and Zentui:
 
 ```text
 zle-pi on  main [!?] +1527 -693 via ⬡ v26.7.0         codex #1 · 5h 95% · 7d 99%
-↑ 263.9k ↓ 29.0k · ↺ 98.9% ·  34.3 t/s · $ 6.406 · ◔ 49.7%    openai/gpt-5.6-sol • high
+↑ 263.9k ↓ 29.0k · ◔ 99.4k/200k · ↺ 98.9% ·  34.3 t/s · $ 6.406    openai/gpt-5.6-sol • high
 custom-extension-status                                                ◷ 16m 22s
 ```
 
@@ -49,7 +49,7 @@ Standard 3-line layout:
 
 ```text
 zle-pi ·  main [!1+2~1?3↑1]                           codex #1 · 5h 95% · 7d 99%
-↑ 263.9k ↓ 29.0k · ↺ 98.9% ·  34.3 t/s · $ 6.406 · ◔ 49.7%    openai/gpt-5.6-sol • high
+↑ 263.9k ↓ 29.0k · ◔ 99.4k/200k · ↺ 98.9% ·  34.3 t/s · $ 6.406    openai/gpt-5.6-sol • high
 custom-extension-status                                                ◷ 16m 22s
 ```
 
@@ -70,10 +70,10 @@ custom-extension-status                                                ◷ 16m 2
 ### Line 2: Session Metrics & Model/Thinking
 - **Left:** Cumulative usage metrics across the active session:
   - `↑ <tokens> ↓ <tokens>`: Total input and output tokens cleanly separated by a single space.
+  - `◔ <used>/<window>`: Context tokens used against the model's context window (e.g. `◔ 99.4k/200k`); `◔ —/<window>` until the first LLM response after compaction and `◔ —` with no active model.
   - `↺ <percent>%`: Cache read hit rate from the latest assistant message.
   - ` <tps> t/s`: Average generation speed (tokens per second) across assistant turns in the user prompt using the Nerd Font bolt ``.
-  - `$ <cost>`: Estimated cumulative session cost.
-  - `◔ <context>%`: Context window utilization percentage.
+  - `$ <cost>`: Estimated cumulative session cost (renders last).
 - **Right:** Active provider and model ID (e.g. `cliproxy/gemini...` or `openai/gpt-5.6-sol`) and thinking level.
   - Model identifier in dim text with bullet separator `•`.
   - Thinking level styled following Pi's editor thinking colors (`theme.getThinkingBorderColor`):

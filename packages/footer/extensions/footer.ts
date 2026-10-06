@@ -129,6 +129,13 @@ export function formatTokens(count: number): string {
 	return `${(count / 1_000_000).toFixed(1)}M`;
 }
 
+/** Whole-unit token format for the context window denominator: 500, 200k, 1M. */
+export function formatTokensWhole(count: number): string {
+	if (count < 1_000) return `${count}`;
+	if (count < 1_000_000) return `${Math.round(count / 1_000)}k`;
+	return `${Math.round(count / 1_000_000)}M`;
+}
+
 export function formatDuration(milliseconds: number): string {
 	const totalSeconds = Math.floor(milliseconds / 1_000);
 	const hours = Math.floor(totalSeconds / 3_600);
@@ -792,7 +799,11 @@ export default function footerExtension(pi: ExtensionAPI): void {
 
 					const reportedBranch = data.getGitBranch()?.replace(/^worktree\//, "");
 					const branch = reportedBranch === "detached" ? undefined : reportedBranch;
-					const context = ctx.getContextUsage()?.percent;
+					const contextUsage = ctx.getContextUsage();
+					const contextStr =
+						contextUsage === undefined
+							? "—"
+							: `${contextUsage.tokens == null ? "—" : formatTokens(contextUsage.tokens)}/${formatTokensWhole(contextUsage.contextWindow)}`;
 					const extensionStatuses = data.getExtensionStatuses();
 
 					// Extract Codex status for Line 1 right
@@ -853,10 +864,10 @@ export default function footerExtension(pi: ExtensionAPI): void {
 						"dim",
 						[
 							tokensStr,
+							`◔ ${contextStr}`,
 							`↺ ${cacheRate === undefined ? "—" : `${cacheRate.toFixed(1)}%`}`,
 							` ${tps === undefined ? "—" : `${tps.toFixed(1)} t/s`}`,
 							`$ ${cost.toFixed(3)}`,
-							`◔ ${context == null ? "—" : `${context.toFixed(1)}%`}`,
 						].join(" · "),
 					);
 

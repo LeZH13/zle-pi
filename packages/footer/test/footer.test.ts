@@ -26,6 +26,7 @@ import footerExtension, {
 	formatStarshipStatus,
 	formatThinkingLevel,
 	formatTokens,
+	formatTokensWhole,
 	getFooterConfigPath,
 	hexColor,
 	loadConfig,
@@ -134,6 +135,12 @@ describe("pi-footer extension", () => {
 			expect(formatTokens(1_200)).toBe("1.2k");
 			expect(formatTokens(250_400)).toBe("250.4k");
 			expect(formatTokens(1_500_000)).toBe("1.5M");
+		});
+
+		it("formats context window tokens in whole units", () => {
+			expect(formatTokensWhole(500)).toBe("500");
+			expect(formatTokensWhole(100_000)).toBe("100k");
+			expect(formatTokensWhole(1_500_000)).toBe("2M");
 		});
 
 		it("formats durations properly", () => {
@@ -290,15 +297,55 @@ describe("pi-footer extension", () => {
 			expect(rendered[0]).toContain("\x1b[38;2;181;189;104m"); // Colors codex footer with #b5bd68
 
 			// Line 2: usage metrics and model/thinking on right
-			expect(line2).toContain("↑ 2.8k ↓ 450 · "); // No dot between input and output tokens
+			expect(line2).toContain("↑ 2.8k ↓ 450 · ◔ 45.0k/100k · ↺ 33.3%"); // Context sits right after tokens
 			expect(line2).toContain("$ 0.100"); // 0.05 + 0.01 + 0.02 + 0.02
-			expect(line2).toContain("◔ 45.0%");
+			expect(line2.indexOf("$ 0.100")).toBeGreaterThan(line2.indexOf("◔")); // Cost renders last
 			expect(line2).toContain("openai/gpt-5.6-sol • high");
 
 			// Line 3: external statuses on left, runtime on right
 			expect(line3).toContain("custom-status-text");
 			expect(line3).toContain("◷ 0s");
 
+			footer.dispose();
+		});
+
+		it("renders the window size even when used tokens are unknown after compaction", async () => {
+			const { start } = setupFooter();
+			const factory = await start({
+				getContextUsage: () => ({ tokens: null, contextWindow: 100_000, percent: null }),
+			});
+
+			const footer = factory(
+				{ requestRender() {} },
+				{ fg: (_c: string, text: string) => text },
+				{
+					getGitBranch: () => "main",
+					getExtensionStatuses: () => new Map(),
+					onBranchChange: () => () => {},
+				},
+			);
+
+			expect(stripTerminalSequences(footer.render(100)[1]!)).toContain("◔ —/100k");
+			footer.dispose();
+		});
+
+		it("renders an em dash context segment when no model context window is available", async () => {
+			const { start } = setupFooter();
+			const factory = await start({
+				getContextUsage: () => undefined,
+			});
+
+			const footer = factory(
+				{ requestRender() {} },
+				{ fg: (_c: string, text: string) => text },
+				{
+					getGitBranch: () => "main",
+					getExtensionStatuses: () => new Map(),
+					onBranchChange: () => () => {},
+				},
+			);
+
+			expect(stripTerminalSequences(footer.render(100)[1]!)).toContain("◔ —");
 			footer.dispose();
 		});
 
