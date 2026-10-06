@@ -41,8 +41,10 @@ Then restart Pi or reload extensions. Previous upstream recap metadata is not mi
 After three user prompts, a short recap appears **above the input editor**:
 
 ```text
-※ recap: OAuth callback validation fixed; tests pass, review pending
+※ recap: OAuth callback validation fixed and tests pass. Next, get review sign-off before merging.
 ```
+
+The recap is one short sentence on the goal and current state, followed by a brief next-step tip — or one open question when no clear next step follows from the conversation.
 
 Automatic recap generation runs after the agent has fully settled, with no pending automatic retry or continuation, and only for completed responses. It refreshes every three completed agent runs by default. Unchanged input skips generation; substantially similar automatic results keep the displayed text stable.
 
@@ -87,7 +89,7 @@ All settings are optional:
 {
   "recap": {
     "model": "provider/model-id",
-    "maxWords": 40,
+    "maxWords": 50,
     "minTurns": 3,
     "cooldownTurns": 3,
     "similarityThreshold": 0.7,
@@ -100,7 +102,7 @@ All settings are optional:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `model` | Active session model | Shared model for recap and naming. Prefer a full `provider/model-id`; a bare ID resolves against the current session model's provider. |
-| `maxWords` | `40` | Maximum whitespace-separated words in a recap |
+| `maxWords` | `50` | Maximum whitespace-separated words in a recap; longer model output is trimmed to this many words with an appended … |
 | `minTurns` | `3` | User messages required before the first automatic recap |
 | `cooldownTurns` | `3` | Completed agent runs between automatic recap attempts; does not delay the first eligible recap |
 | `similarityThreshold` | `0.7` | Word-set Jaccard overlap at or above which an automatic result retains the displayed recap; between 0 and 1 |
@@ -109,7 +111,7 @@ All settings are optional:
 | `prompts.recap` | Built-in | Replace the recap system prompt |
 | `prompts.name` | Built-in | Replace the naming system prompt |
 
-Word and turn limits must be positive safe integers. Invalid values use their defaults. Title length stays fixed at 60 code points. Prompt overrides should request one plain-text content line; validation and length caps still apply.
+Word and turn limits must be positive safe integers. Invalid values use their defaults. Title length stays fixed at 60 code points. Prompt overrides should request one plain-text content line; validation and length caps still apply. Output cleanup strips trailing periods but preserves trailing `?` and `!`, so a recap may end with an open question.
 
 For example, disable automatic naming and use a custom naming prompt for explicit `/autoname` calls:
 

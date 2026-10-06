@@ -14,21 +14,21 @@ const assistant = (manager: SessionManager, text: string, tools: string[] = []) 
 
 describe("trusted recap settings", () => {
 	it.each([undefined, null, [], true, "bad", { recap: [] }, { recap: null }])("defaults malformed settings %j", settings => {
-		expect(readConfig(settings)).toMatchObject({ model: undefined, maxWords: 40, minTurns: 3, cooldownTurns: 3, similarityThreshold: 0.7, placement: "aboveEditor", autoName: true });
+		expect(readConfig(settings)).toMatchObject({ model: undefined, maxWords: 50, minTurns: 3, cooldownTurns: 3, similarityThreshold: 0.7, placement: "aboveEditor", autoName: true });
 	});
 	it("uses only the recap namespace and trims configured prompts/model", () => {
 		const result = readConfig({ model: "ignored", autoName: false, recap: { model: " provider/id/path ", maxWords: 7, minTurns: 1, cooldownTurns: 2, similarityThreshold: 0, placement: "below", autoName: false, prompts: { recap: " Custom recap ", name: " Custom name " } } });
 		expect(result).toEqual({ model: "provider/id/path", maxWords: 7, minTurns: 1, cooldownTurns: 2, similarityThreshold: 0, placement: "belowEditor", autoName: false, recapPrompt: "Custom recap", namePrompt: "Custom name" });
 	});
 	it.each([0, -1, 1.5, NaN, Infinity, "3", Number.MAX_SAFE_INTEGER + 1])("rejects invalid positive integers %s", value => {
-		expect(readConfig({ recap: { maxWords: value, minTurns: value, cooldownTurns: value } })).toMatchObject({ maxWords: 40, minTurns: 3, cooldownTurns: 3 });
+		expect(readConfig({ recap: { maxWords: value, minTurns: value, cooldownTurns: value } })).toMatchObject({ maxWords: 50, minTurns: 3, cooldownTurns: 3 });
 	});
 	it.each([-1, 1.01, NaN, Infinity, "0.5"])("rejects invalid similarity threshold %s", value => {
 		expect(readConfig({ recap: { similarityThreshold: value } }).similarityThreshold).toBe(0.7);
 	});
 	it("accepts threshold endpoints and only literal false disables naming", () => {
 		expect(readConfig({ recap: { similarityThreshold: 1, autoName: "false", placement: "belowEditor", prompts: { name: " ", recap: null } } })).toMatchObject({ similarityThreshold: 1, autoName: true, placement: "aboveEditor" });
-		expect(readConfig({ recap: { maxWords: 12 } }).recapPrompt).toContain("under 12 words");
+		expect(readConfig({ recap: { maxWords: 12 } }).recapPrompt).toContain("next-step tip");
 		expect(readConfig({}).namePrompt).toContain("at most 60 characters");
 	});
 });
@@ -40,9 +40,9 @@ describe("output validation and cleanup", () => {
 		expect(extractText({ type: "text", text: "not an array" })).toBe("");
 	});
 	it.each([
-		["- **Build** `widgets`!", "Build widgets"], ["1. Fix [routing](https://example.test).", "Fix routing"],
-		["※ recap: Fix tests。", "Fix tests"], ["Title: “修复测试！”", "修复测试"],
-		["Here's the recap: Done?!", "Done"], ["\u001b[31mSession name: Plain\u001b[0m\u0007", "Plain"],
+		["- **Build** `widgets`!", "Build widgets!"], ["1. Fix [routing](https://example.test).", "Fix routing"],
+		["※ recap: Fix tests。", "Fix tests"], ["Title: “修复测试！”", "修复测试！"],
+		["Here's the recap: Done?!", "Done?!"], ["\u001b[31mSession name: Plain\u001b[0m\u0007", "Plain"],
 		["# Heading", "Heading"], ["• Work   on  tests", "Work on tests"],
 	])("cleans %j", (input, expected) => expect(cleanLine(input)).toBe(expected));
 	it("accepts a single content line with removable heading and collapses CRLF/whitespace", () => {
