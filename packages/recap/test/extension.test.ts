@@ -1,7 +1,7 @@
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NAMING_KEY, STATE_KEY } from "../lib/summary.js";
+import { NAMING_KEY, STATE_KEY, TITLE_RETRY_PROMPT } from "../lib/summary.js";
 import { flush, response, setup } from "./harness.js";
 
 beforeEach(() => {
@@ -258,6 +258,95 @@ describe("forced commands and configured shared model", () => {
 	});
 });
 
+describe("title output contract", () => {
+	it.each([
+		["word overflow", "Plan the upstream contribution from the PR thread and verify everything safely with targeted tests", "Plan upstream PR contribution"],
+		["character overflow", "Internationalization configuration for additional documentation files", "i18n configuration docs"],
+	])("corrects a %s title with one bounded retry, same model and prompt", async (_label, first, second) => {
+		const h = setup(); await h.start(); h.user();
+		h.answer(first);
+		h.answer(second);
+		await h.command("autoname");
+		expect(h.streamSimple).toHaveBeenCalledTimes(2);
+		expect(h.manager.getSessionName()).toBe(second);
+		expect(h.notify).toHaveBeenLastCalledWith(`Session named: ${second}`, "info");
+		const [initial, corrective] = h.streamSimple.mock.calls as any[];
+		expect(corrective[0]).toBe(initial[0]);
+		expect(corrective[1].systemPrompt).toBe(initial[1].systemPrompt);
+		expect(initial[1].messages).toHaveLength(1);
+		// The corrective request re-sends the original subject snapshot as its
+		// first message and the instruction as a separate second user message.
+		expect(corrective[1].messages).toHaveLength(2);
+		expect(corrective[1].messages[0].content[0].text).toBe(initial[1].messages[0].content[0].text);
+		expect(corrective[1].messages[1].content[0].text).toBe(TITLE_RETRY_PROMPT);
+		expect(corrective[2]).toMatchObject({ maxTokens: 512, cacheRetention: "none", signal: initial[2].signal });
+	});
+	it("does not set an invalid title when the corrective retry also fails, and stays eligible", async () => {
+		const h = setup(); await h.start(); h.user();
+		h.answer("one two three four five six seven eight nine");
+		h.answer("still far too many words for a compact session title here");
+		await h.command("autoname");
+		expect(h.streamSimple).toHaveBeenCalledTimes(2);
+		expect(h.setSessionName).not.toHaveBeenCalled();
+		expect(h.manager.getSessionName()).toBeUndefined();
+		expect(h.notify).toHaveBeenLastCalledWith(expect.stringContaining("Session naming failed:"), "warning");
+		h.answer("Valid retry title");
+		await h.run();
+		expect(h.manager.getSessionName()).toBe("Valid retry title");
+	});
+	it("never correctively retries provider failures", async () => {
+		const h = setup(); await h.start(); h.user();
+		h.answer("unused", "error");
+		await h.command("autoname");
+		expect(h.streamSimple).toHaveBeenCalledTimes(1);
+		expect(h.setSessionName).not.toHaveBeenCalled();
+		h.streamSimple.mockImplementationOnce(() => ({ result: () => Promise.reject(new Error("Provider down")) }));
+		await h.run();
+		expect(h.streamSimple).toHaveBeenCalledTimes(2);
+		expect(h.notify.mock.calls.some(([text]) => text.includes("Provider down"))).toBe(true);
+	});
+	it("cancels between title attempts without late name mutation", async () => {
+		const h = setup(); await h.start(); h.user();
+		h.answer("one two three four five six seven eight");
+		const corrective = h.pending();
+		const job = h.command("autoname");
+		await flush();
+		const signal = (h.streamSimple.mock.calls[1] as any)[2].signal;
+		await h.emit("agent_start");
+		expect(signal.aborted).toBe(true);
+		corrective.resolve(response("Late title"));
+		await job;
+		expect(h.setSessionName).not.toHaveBeenCalled();
+		expect(h.manager.getSessionName()).toBeUndefined();
+	});
+	it("applies the hard title contract to custom naming prompts", async () => {
+		const h = setup({ settings: { recap: { prompts: { name: "Give a label" } } } });
+		await h.start(); h.user();
+		h.answer("one two three four five six seven");
+		h.answer("Compact label");
+		await h.command("autoname");
+		const [initial, corrective] = h.streamSimple.mock.calls as any[];
+		expect(initial[1].systemPrompt).toBe("Give a label");
+		expect(corrective[1].systemPrompt).toBe("Give a label");
+		expect(h.manager.getSessionName()).toBe("Compact label");
+	});
+	it("sends subject-focused input to naming while recaps keep state framing", async () => {
+		const h = setup(); await h.start(); h.user("Refactor the login flow");
+		h.assistant();
+		await h.run();
+		const namePrompt = (h.streamSimple.mock.calls[0] as any)[1].messages[0].content[0].text;
+		expect(namePrompt).toContain("Refactor the login flow");
+		expect(namePrompt).not.toContain("Assistant:");
+		expect(namePrompt).not.toContain("Completed feature work");
+		expect(namePrompt).not.toContain("confirmed state");
+		h.answer("Recap text");
+		await h.command("recap");
+		const recapPrompt = (h.streamSimple.mock.calls[1] as any)[1].messages[0].content[0].text;
+		expect(recapPrompt).toContain("Assistant: Completed feature work");
+		expect(recapPrompt).toContain("confirmed state");
+	});
+});
+
 describe("automatic idle recaps and branch freshness", () => {
 	it("requires three prompts and two uninterrupted idle minutes, then refreshes after each eligible run", async () => {
 		const h = setup({ settings: { recap: { autoName: false } } }); await h.start();
@@ -384,6 +473,26 @@ describe("automatic idle recaps and branch freshness", () => {
 		expect(projection).not.toHaveBeenCalled();
 		h.manager.appendContextEdit(goal, { content: "New goal" });
 		expect(component.render(80)).toEqual([]); expect(projection).toHaveBeenCalledTimes(1);
+		projection.mockRestore();
+	});
+	it("builds one snapshot per purpose per settle cycle and never reprojects on purpose switches", async () => {
+		const h = setup(); await h.start(); h.user("Refactor the login flow"); h.assistant();
+		const projection = vi.spyOn(h.manager, "buildSessionProjection");
+		await h.emit("agent_before_settle", { outcome: "completed" });
+		await h.emit("agent_settled"); await flush();
+		// One for the settle-state check, one for the recap settle key, one for
+		// the name request; render, schedule, and purpose switches reuse the cache.
+		expect(projection).toHaveBeenCalledTimes(3);
+		h.terminal("a");
+		// Naming's session_info write advanced the leaf, so one recap rebuild is
+		// expected on the next projection consumer.
+		expect(projection).toHaveBeenCalledTimes(4);
+		h.assistant();
+		await h.emit("agent_before_settle", { outcome: "completed" });
+		await h.emit("agent_settled"); await flush();
+		// The new leaf rebuilds the recap snapshot only; an already named session
+		// never builds the naming snapshot at all.
+		expect(projection).toHaveBeenCalledTimes(6);
 		projection.mockRestore();
 	});
 	it("removes input subscriptions on reload and shutdown", async () => {

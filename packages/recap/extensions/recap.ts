@@ -5,7 +5,7 @@
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Loader, stripTerminalSequences, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { buildSnapshot, cleanOutput, NAMING_KEY, pickModel, readConfig, STATE_KEY, extractText } from "../lib/summary.js";
+import { buildSnapshot, cleanRecap, cleanTitle, NAMING_KEY, pickModel, readConfig, STATE_KEY, extractText, TITLE_RETRY_PROMPT, validateTitle } from "../lib/summary.js";
 
 const WIDGET_KEY = "zle-recap";
 type Kind = "recap" | "name";
@@ -34,19 +34,22 @@ export default function recapExtension(pi: ExtensionAPI) {
 	const reportedErrors = new Set<string>();
 	let snapshotManager: ExtensionContext["sessionManager"] | undefined;
 	let snapshotLeaf: string | null | undefined;
-	let cachedSnapshot: ReturnType<typeof buildSnapshot>;
+	let cachedSnapshots: Partial<Record<"recap" | "name", ReturnType<typeof buildSnapshot>>> = {};
 
-	function snapshotFor(ctx: ExtensionContext) {
+	function snapshotFor(ctx: ExtensionContext, purpose: "recap" | "name") {
 		const manager = ctx.sessionManager;
 		const leaf = manager.getLeafId();
 		// Session history is append-only; edits and compaction create new leaves.
-		// Rendering and raw keystrokes must not re-project the entire conversation.
+		// Rendering and raw keystrokes must not re-project the entire conversation,
+		// and both purposes share one per-leaf cache so purpose switches never
+		// re-project either.
 		if (snapshotManager !== manager || snapshotLeaf !== leaf) {
-			cachedSnapshot = buildSnapshot(ctx);
+			cachedSnapshots = {};
 			snapshotManager = manager;
 			snapshotLeaf = leaf;
 		}
-		return cachedSnapshot;
+		if (!(purpose in cachedSnapshots)) cachedSnapshots[purpose] = buildSnapshot(ctx, purpose);
+		return cachedSnapshots[purpose];
 	}
 
 	function supported(ctx: ExtensionContext): boolean {
@@ -98,7 +101,7 @@ export default function recapExtension(pi: ExtensionAPI) {
 		stopLoader();
 		const placement = readConfig(pi.getSettings()).placement;
 		if (widgetPlacement && widgetPlacement !== placement) ctx.ui.setWidget(WIDGET_KEY, undefined);
-		const fresh = ctx.isIdle() && state.recap && state.inputKey === snapshotFor(ctx)?.inputKey;
+		const fresh = ctx.isIdle() && state.recap && state.inputKey === snapshotFor(ctx, "recap")?.inputKey;
 		if (generating !== "recap" && !fresh) {
 			ctx.ui.setWidget(WIDGET_KEY, undefined);
 			widgetPlacement = undefined;
@@ -118,7 +121,7 @@ export default function recapExtension(pi: ExtensionAPI) {
 			return {
 				invalidate() {},
 				render(width: number): string[] {
-					if (width <= 0 || !ctx.isIdle() || !state.recap || state.inputKey !== snapshotFor(ctx)?.inputKey) return [];
+					if (width <= 0 || !ctx.isIdle() || !state.recap || state.inputKey !== snapshotFor(ctx, "recap")?.inputKey) return [];
 					const text = theme.fg("accent", theme.bold("※ recap:")) + " " + theme.fg("muted", theme.italic(state.recap));
 					return wrapTextWithAnsi(text, width).map(line => truncateToWidth(line, width));
 				},
@@ -144,11 +147,13 @@ export default function recapExtension(pi: ExtensionAPI) {
 		if (!supported(ctx)) return { kind: "skipped", reason: "TUI mode required" };
 		if (!ctx.isIdle() || controller) return { kind: "skipped", reason: "Agent or summary generation is busy; retry once idle" };
 		const config = readConfig(pi.getSettings());
-		const snapshot = snapshotFor(ctx);
-		if (!snapshot) return { kind: "skipped", reason: "No conversation yet" };
+		// Eligibility is decided before any snapshot work so an already named or
+		// ineligible session never pays for a naming projection.
 		if (kind === "name" && !force && (!config.autoName || !namingEligible || pi.getSessionName()?.trim())) {
 			return { kind: "skipped", reason: "Automatic naming not eligible" };
 		}
+		const snapshot = snapshotFor(ctx, kind);
+		if (!snapshot) return { kind: "skipped", reason: "No conversation yet" };
 		if (kind === "recap" && !force) {
 			if (snapshot.userCount < config.minTurns) return { kind: "skipped", reason: "Not enough user prompts" };
 			if (snapshot.inputKey === state.inputKey) return { kind: "skipped", reason: "Conversation unchanged" };
@@ -165,17 +170,37 @@ export default function recapExtension(pi: ExtensionAPI) {
 		generating = kind;
 		const stillCurrent = () => !request.signal.aborted && epoch === token && sessionId === capturedSession
 			&& ctx.isIdle() && (kind === "name" || activityRevision === capturedActivity)
-			&& snapshotFor(ctx)?.inputKey === snapshot.inputKey;
+			&& snapshotFor(ctx, kind)?.inputKey === snapshot.inputKey;
 		try {
 			const model = pickModel(ctx, config.model);
 			if (kind === "recap") render(ctx);
-			const response = await ctx.modelRegistry.streamSimple(model, {
-				systemPrompt: kind === "name" ? config.namePrompt : config.recapPrompt,
-				messages: [{ role: "user", content: [{ type: "text", text: snapshot.prompt }], timestamp: Date.now() }],
+			const systemPrompt = kind === "name" ? config.namePrompt : config.recapPrompt;
+			const userMessage = (text: string) => ({ role: "user" as const, content: [{ type: "text" as const, text }], timestamp: Date.now() });
+			const requestSummary = (messages: ReturnType<typeof userMessage>[]) => ctx.modelRegistry.streamSimple(model, {
+				systemPrompt,
+				messages,
 			}, { maxTokens: 512, cacheRetention: "none", signal: request.signal }).result();
+			let response = await requestSummary([userMessage(snapshot.prompt)]);
 			if (!stillCurrent()) return { kind: "cancelled" };
 			if (response.stopReason !== "stop") throw new Error(`Model response did not finish (${response.stopReason})`);
-			const output = cleanOutput(extractText(response.content), kind, config.maxWords);
+			let output: string;
+			if (kind === "name") {
+				let title = validateTitle(cleanTitle(extractText(response.content)));
+				if (!title.ok) {
+					// One corrective request with the same model, system prompt, and
+					// original subject snapshot, the instruction sent as its own
+					// user message. Never a third call; provider errors are ordinary
+					// failures and cancel/staleness still discard results.
+					response = await requestSummary([userMessage(snapshot.prompt), userMessage(TITLE_RETRY_PROMPT)]);
+					if (!stillCurrent()) return { kind: "cancelled" };
+					if (response.stopReason !== "stop") throw new Error(`Model response did not finish (${response.stopReason})`);
+					title = validateTitle(cleanTitle(extractText(response.content)));
+					if (!title.ok) throw new Error(`Session naming still exceeded the title limits after one correction (${title.reason})`);
+				}
+				output = title.title;
+			} else {
+				output = cleanRecap(extractText(response.content), config.maxWords);
+			}
 			if (kind === "name") {
 				if (nameRevision !== capturedNameRevision || pi.getSessionName() !== capturedName) return { kind: "cancelled" };
 				if (!force && pi.getSessionName()?.trim()) return { kind: "cancelled" };
@@ -204,7 +229,7 @@ export default function recapExtension(pi: ExtensionAPI) {
 
 	function schedule(ctx: ExtensionContext) {
 		clearTimer();
-		const snapshot = snapshotFor(ctx);
+		const snapshot = snapshotFor(ctx, "recap");
 		const config = readConfig(pi.getSettings());
 		if (!ctx.isIdle() || !settledKey || snapshot?.inputKey !== settledKey || snapshot.userCount < config.minTurns || state.inputKey === settledKey) return;
 		const token = epoch;
@@ -291,7 +316,7 @@ export default function recapExtension(pi: ExtensionAPI) {
 		completed = false;
 		const token = epoch;
 		try {
-			settledKey = snapshotFor(ctx)?.inputKey;
+			settledKey = snapshotFor(ctx, "recap")?.inputKey;
 			namingJob = generate("name", ctx, false);
 			void namingJob.catch(error => {
 				if (epoch === token) report(ctx, "name", error instanceof Error ? error.message : String(error), false);

@@ -66,10 +66,12 @@ An initially empty new session receives a short descriptive title after its firs
 OAuth callback validation
 ```
 
-- Titles aim for 4–8 words, match the conversation language, and are capped at 60 Unicode code points, including an ellipsis when shortened.
+- Titles are compact identifying labels of the session's subject and topic — ideally 3–6 words — and match the conversation language. They never describe the assistant's workflow, progress, next steps, or incidental qualifiers about how the work is done.
+- Titles are capped at 60 Unicode code points and 6 words (the word cap only applies to space-separated writing; whitespace-free scripts are governed by the code-point cap). An overlong title triggers one corrective regeneration with the same model and subject context; if the retry is still invalid, no title is applied. Titles are never silently sliced or abbreviated with an ellipsis.
 - Automatic naming applies only if the session remains unnamed. Existing names from `/name`, `--name`, or another extension are preserved.
 - Once named, the title stays unchanged across later responses.
 - If generation fails, automatic naming retries after a later completed response while that new session remains eligible and unnamed.
+- Naming input is subject-focused: the session's original goal, the user's own messages, and the tools the session touched. Assistant narration, tool outcome excerpts, and recap state framing are never sent to the naming model.
 - Reloading an eligible session retains pending naming eligibility. Resuming it revokes eligibility; a subsequent reload does not re-enable it.
 - Resumed conversations, forks, clones, and sessions with parent-session linkage are not automatically named. Use `/autoname` in those sessions.
 
@@ -115,7 +117,7 @@ All settings are optional:
 | `prompts.recap` | Built-in | Replace the recap system prompt |
 | `prompts.name` | Built-in | Replace the naming system prompt |
 
-Word, prompt-count, and idle-delay limits must be positive safe integers. `cooldownTurns` and `similarityThreshold` have been removed; replace turn-based cadence with `idleDelaySeconds`. Idle delays must not exceed 2,147,483 seconds (Node's timer limit). Invalid values use their defaults. Title length stays fixed at 60 code points. Prompt overrides should request one plain-text content line; validation and length caps still apply. Recaps keep the model's trailing punctuation (`.`, `?`, `!`), so a recap may end with an open question; session titles strip trailing periods.
+Word, prompt-count, and idle-delay limits must be positive safe integers. `cooldownTurns` and `similarityThreshold` have been removed; replace turn-based cadence with `idleDelaySeconds`. Idle delays must not exceed 2,147,483 seconds (Node's timer limit). Invalid values use their defaults. Title limits stay fixed at 60 code points and 6 words and are enforced regardless of prompt overrides: an overlong title triggers one corrective request, and a still-invalid title is never applied. Prompt overrides should request one plain-text content line; validation still applies. Recaps keep the model's trailing punctuation (`.`, `?`, `!`), so a recap may end with an open question; session titles strip trailing periods.
 
 For example, disable automatic naming and use a custom naming prompt for explicit `/autoname` calls:
 

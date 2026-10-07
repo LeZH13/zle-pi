@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-recap",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Session recaps and automatic session naming for Pi.",
   "type": "module",
   "keywords": [

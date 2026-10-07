@@ -1,7 +1,7 @@
 import { SessionManager, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
-import { buildSnapshot, cleanLine, cleanOutput, extractText, pickModel, readConfig, STATE_KEY, TITLE_MAX_CHARS } from "../lib/summary.js";
+import { buildSnapshot, cleanLine, cleanRecap, cleanTitle, extractText, pickModel, readConfig, STATE_KEY, TITLE_MAX_CHARS, TITLE_MAX_WORDS, TITLE_RETRY_PROMPT, validateTitle } from "../lib/summary.js";
 import { model } from "./harness.js";
 
 const context = (sessionManager: SessionManager) => ({ sessionManager }) as unknown as ExtensionContext;
@@ -34,7 +34,13 @@ describe("trusted recap settings", () => {
 			expect(recapPrompt).toContain(phrase);
 		}
 		expect(recapPrompt).toContain("never report attempts as done");
+		expect(namePrompt).toContain(`3 to ${TITLE_MAX_WORDS} words`);
 		expect(namePrompt).toContain("at most 60 characters");
+		expect(namePrompt).toContain("subject and topic");
+		expect(namePrompt).toContain("not the assistant's workflow, progress, or next steps");
+		expect(namePrompt).toContain("how the work is done");
+		expect(TITLE_RETRY_PROMPT).toContain(`${TITLE_MAX_CHARS} characters`);
+		expect(TITLE_RETRY_PROMPT).toContain(`${TITLE_MAX_WORDS} words`);
 	});
 	it("only literal false disables naming and both placement labels resolve", () => {
 		expect(readConfig({ recap: { autoName: "false", placement: "belowEditor", prompts: { name: " ", recap: null } } })).toMatchObject({ autoName: true, placement: "aboveEditor" });
@@ -55,21 +61,38 @@ describe("output validation and cleanup", () => {
 		["# Heading", "Heading"], ["• Work   on  tests", "Work on tests"],
 	])("cleans %j", (input, expected) => expect(cleanLine(input)).toBe(expected));
 	it("accepts a single content line with removable heading and collapses CRLF/whitespace", () => {
-		expect(cleanOutput("\r\n# Heading\r\n  Recap: **Fix**   tests. \r\n", "recap", 40)).toBe("Fix tests.");
+		expect(cleanRecap("\r\n# Heading\r\n  Recap: **Fix**   tests. \r\n", 40)).toBe("Fix tests.");
 	});
 	it.each(["", " \n ", "# Heading", "first\nsecond", "{\"title\":\"wrong\"}", "[\"wrong\"]", "x".repeat(4001), "\u001b[31m\u001b[0m"])("rejects malformed output %j", input => {
-		expect(() => cleanOutput(input, "name", 40)).toThrow();
+		expect(() => cleanRecap(input, 40)).toThrow();
+		expect(() => cleanTitle(input)).toThrow();
 	});
 	it("strips trailing periods from titles but keeps recap punctuation", () => {
-		expect(cleanOutput("Fix the login bug.", "name", 40)).toBe("Fix the login bug");
-		expect(cleanOutput("Fix the login bug?", "name", 40)).toBe("Fix the login bug?");
+		expect(cleanTitle("Fix the login bug.")).toBe("Fix the login bug");
+		expect(cleanTitle("Fix the login bug?")).toBe("Fix the login bug?");
+		expect(cleanRecap("Fix the login bug.", 40)).toBe("Fix the login bug.");
 	});
-	it("caps recaps by words and titles by Unicode code points without surrogate splitting", () => {
-		expect(cleanOutput("one two three four", "recap", 3)).toBe("one two three…");
-		expect(cleanOutput("one two three", "recap", 3)).toBe("one two three");
-		expect(cleanOutput("😀".repeat(61), "name", 1)).toBe("😀".repeat(59) + "…");
-		expect(Array.from(cleanOutput("界".repeat(70), "name", 1))).toHaveLength(TITLE_MAX_CHARS);
-		expect(cleanOutput("x".repeat(60), "name", 1)).toHaveLength(60);
+	it("caps recaps by words with an ellipsis, unchanged", () => {
+		expect(cleanRecap("one two three four", 3)).toBe("one two three…");
+		expect(cleanRecap("one two three", 3)).toBe("one two three");
+	});
+	it("rejects empty titles, including punctuation-only responses after cleanup", () => {
+		for (const line of ["", "   ", cleanTitle("."), cleanTitle("..."), cleanTitle("。")]) {
+			expect(validateTitle(line)).toEqual({ ok: false, reason: "empty title" });
+		}
+	});
+	it("titles are validated, never silently sliced", () => {
+		expect(validateTitle("x".repeat(TITLE_MAX_CHARS))).toEqual({ ok: true, title: "x".repeat(TITLE_MAX_CHARS) });
+		expect(validateTitle(`${"x".repeat(TITLE_MAX_CHARS)}y`)).toMatchObject({ ok: false, reason: expect.stringContaining("characters (limit 60)") });
+		expect(validateTitle("😀".repeat(TITLE_MAX_CHARS)).ok).toBe(true);
+		expect(validateTitle("😀".repeat(TITLE_MAX_CHARS + 1)).ok).toBe(false);
+		expect(validateTitle("one two three four five six")).toEqual({ ok: true, title: "one two three four five six" });
+		expect(validateTitle("one two three four five six seven")).toMatchObject({ ok: false, reason: "7 words (limit 6)" });
+		// Whitespace-free scripts yield one token: the code-point cap governs them
+		// and the word cap never rejects same-language titles.
+		expect(validateTitle("界".repeat(TITLE_MAX_CHARS))).toEqual({ ok: true, title: "界".repeat(TITLE_MAX_CHARS) });
+		expect(validateTitle("界".repeat(TITLE_MAX_CHARS + 1)).ok).toBe(false);
+		expect(validateTitle("Fix 修复 the 登录 bug").ok).toBe(true);
 	});
 });
 
@@ -109,7 +132,7 @@ describe("bounded session snapshot", () => {
 		const m = SessionManager.inMemory();
 		m.appendSessionInfo("Existing name");
 		m.appendCustomEntry("state", { text: "hidden" });
-		expect(buildSnapshot(context(m))).toBeUndefined();
+		expect(buildSnapshot(context(m), "recap")).toBeUndefined();
 	});
 	it("retains original goal, renders a three-round window and deduplicates tool outcomes", () => {
 		const m = SessionManager.inMemory();
@@ -121,7 +144,7 @@ describe("bounded session snapshot", () => {
 			toolResult(m, "call-2", "edit", `edit-${i}`);
 			assistant(m, `final-${i}`);
 		}
-		const result = buildSnapshot(context(m))!;
+		const result = buildSnapshot(context(m), "recap")!;
 		expect(result).toMatchObject({ goal: "user-0", userCount: 5 });
 		expect(result.prompt).toContain("Earlier exchange:");
 		expect(result.prompt).toContain("Most recent exchange:");
@@ -137,30 +160,70 @@ describe("bounded session snapshot", () => {
 		// Freshness covers the whole effective conversation, independent of the
 		// truncated prompt, and our own persisted state never expires a recap.
 		expect(result.inputKey).toMatch(/^[a-f0-9]{64}$/);
-		expect(buildSnapshot(context(m))!.inputKey).toBe(result.inputKey);
+		expect(buildSnapshot(context(m), "recap")!.inputKey).toBe(result.inputKey);
 		m.appendCustomEntry("ignored", { text: "noise" });
 		m.appendCustomEntry(STATE_KEY, { recap: "x" });
 		m.appendCustomMessageEntry(STATE_KEY, "recap metadata noise", false, undefined);
-		expect(buildSnapshot(context(m))!.inputKey).toBe(result.inputKey);
+		expect(buildSnapshot(context(m), "recap")!.inputKey).toBe(result.inputKey);
 		m.appendCustomMessageEntry("other", "injected context", true, undefined);
-		expect(buildSnapshot(context(m))!.inputKey).not.toBe(result.inputKey);
+		expect(buildSnapshot(context(m), "recap")!.inputKey).not.toBe(result.inputKey);
+	});
+	it("renders a subject-focused name prompt without recap state or assistant narration", () => {
+		const m = SessionManager.inMemory();
+		user(m, "Refactor the login flow");
+		assistant(m, "I will carefully verify the plan before any edits", ["read", "bash", "read"]);
+		toolResult(m, "call-0", "read", "read output details");
+		toolResult(m, "call-1", "bash", "bash output details");
+		assistant(m, "All verified, ready to implement next");
+		user(m, "Also update the docs");
+		const name = buildSnapshot(context(m), "name")!;
+		const recap = buildSnapshot(context(m), "recap")!;
+		expect(name.prompt).toContain("Refactor the login flow");
+		expect(name.prompt).toContain("Also update the docs");
+		expect(name.prompt).toContain("Tools: read, bash");
+		expect(name.prompt).toContain("Use the same language as the user's messages.");
+		for (const absent of ["Assistant:", "carefully verify", "ready to implement", "read output", "Earlier exchange:", "Most recent exchange:", "confirmed state", "attempted", "verified", "Judge current state"]) {
+			expect(name.prompt).not.toContain(absent);
+		}
+		// Recaps keep today's full-state framing.
+		expect(recap.prompt).toContain("Assistant: All verified, ready to implement next");
+		expect(recap.prompt).toContain("Tools: read ok, bash ok");
+		expect(recap.prompt).toContain("confirmed state");
+		// The freshness key is purpose-independent.
+		expect(name.inputKey).toBe(recap.inputKey);
+	});
+	it("excludes compaction summaries from the name prompt but keeps the original goal", () => {
+		const m = SessionManager.inMemory();
+		user(m, "Build original feature");
+		assistant(m, "compacted secret answer");
+		const kept = user(m, "Current task");
+		m.appendCompaction("Summarized earlier progress", kept, 1000);
+		assistant(m, "Current answer");
+		const name = buildSnapshot(context(m), "name")!;
+		const recap = buildSnapshot(context(m), "recap")!;
+		expect(name.prompt).toContain("Build original feature");
+		expect(name.prompt).toContain("Current task");
+		expect(name.prompt).not.toContain("Summarized earlier progress");
+		expect(name.prompt).not.toContain("Current answer");
+		expect(recap.prompt).toContain("Summarized earlier progress");
+		expect(recap.prompt).toContain("Current answer");
 	});
 	it("folds tool calls, results and call arguments into the freshness key", () => {
 		const m = SessionManager.inMemory();
 		user(m, "task");
-		const base = buildSnapshot(context(m))!.inputKey;
+		const base = buildSnapshot(context(m), "recap")!.inputKey;
 		assistant(m, "ran a tool", ["read"]);
-		const withCall = buildSnapshot(context(m))!.inputKey;
+		const withCall = buildSnapshot(context(m), "recap")!.inputKey;
 		expect(withCall).not.toBe(base);
 		toolResult(m, "call-0", "read", "done");
-		const withResult = buildSnapshot(context(m))!.inputKey;
+		const withResult = buildSnapshot(context(m), "recap")!.inputKey;
 		expect(withResult).not.toBe(withCall);
 		m.appendMessage({
 			role: "assistant", content: [{ type: "toolCall", name: "read", id: "call-args", arguments: { path: "different" } }],
 			api: "openai-responses", provider: "test", model: "test", stopReason: "stop", timestamp: 2,
 			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
 		} as AssistantMessage);
-		expect(buildSnapshot(context(m))!.inputKey).not.toBe(withResult);
+		expect(buildSnapshot(context(m), "recap")!.inputKey).not.toBe(withResult);
 	});
 	it("renders bounded tool outcomes and errors, never raw full logs", () => {
 		const m = SessionManager.inMemory();
@@ -169,7 +232,7 @@ describe("bounded session snapshot", () => {
 		toolResult(m, "call-0", "bash", `OKHEAD ${"x".repeat(600)} OKTAIL`);
 		toolResult(m, "call-1", "edit", `ERRHEAD ${"y".repeat(600)} ERRTAIL`, true);
 		assistant(m, "All checks passed");
-		const { prompt } = buildSnapshot(context(m))!;
+		const { prompt } = buildSnapshot(context(m), "recap")!;
 		expect(prompt).toContain("Most recent exchange:");
 		expect(prompt).toContain("Tools: bash ok, edit failed, grep attempted");
 		// Successful and failing outcomes are excerpted with both ends kept and
@@ -189,7 +252,7 @@ describe("bounded session snapshot", () => {
 		const m = SessionManager.inMemory(); user(m, "Task");
 		const name = "tool".repeat(5000); assistant(m, "Done", [name, name]);
 		toolResult(m, "call-0", name, "Success"); toolResult(m, "call-1", name, "Failure", true);
-		const { prompt } = buildSnapshot(context(m))!;
+		const { prompt } = buildSnapshot(context(m), "recap")!;
 		expect(prompt).toContain("Success"); expect(prompt).toContain("Failure");
 		expect(prompt.length).toBeLessThan(2000); expect(prompt).not.toContain("tool".repeat(100));
 	});
@@ -201,7 +264,7 @@ describe("bounded session snapshot", () => {
 		assistant(m, "first result");
 		user(m, "Second task");
 		assistant(m, "second plan");
-		const { prompt } = buildSnapshot(context(m))!;
+		const { prompt } = buildSnapshot(context(m), "recap")!;
 		expect(prompt).toContain("Earlier exchange:");
 		expect(prompt).toContain("Most recent exchange:");
 		expect(prompt).toContain("First task");
@@ -218,7 +281,7 @@ describe("bounded session snapshot", () => {
 		user(m, "First task");
 		assistant(m, "first answer");
 		user(m, "Pending follow-up");
-		const { prompt } = buildSnapshot(context(m))!;
+		const { prompt } = buildSnapshot(context(m), "recap")!;
 		expect(prompt).toContain("Most recent exchange:");
 		expect(prompt).toContain("Assistant: first answer");
 		expect(prompt).toContain("Unanswered exchange (no assistant reply yet):");
@@ -230,7 +293,7 @@ describe("bounded session snapshot", () => {
 		const kept = user(m, `HEADMARK${"m".repeat(600)}TAILMARK`);
 		assistant(m, "a".repeat(2000), ["t".repeat(400)]);
 		m.appendCompaction("s".repeat(2000), kept, 100);
-		const result = buildSnapshot(context(m))!;
+		const result = buildSnapshot(context(m), "recap")!;
 		expect(result.goal).toHaveLength(500);
 		expect(result.userCount).toBe(2);
 		const prompt = result.prompt;
@@ -261,15 +324,15 @@ describe("bounded session snapshot", () => {
 		const answer = assistant(m, "private replaced answer");
 		m.appendContextEdit(goal, { content: "safe revised goal" });
 		m.appendContextEdit(omitted, null);
-		const interim = buildSnapshot(context(m))!;
+		const interim = buildSnapshot(context(m), "recap")!;
 		m.appendContextEdit(answer, { content: [{ type: "text", text: "safe answer" }] });
-		const result = buildSnapshot(context(m))!;
+		const result = buildSnapshot(context(m), "recap")!;
 		expect(result.goal).toBe("safe revised goal");
 		expect(result.prompt).not.toContain("private");
 		expect(result.prompt).toContain("safe answer");
 		expect(result.inputKey).not.toBe(interim.inputKey);
 		m.appendContextEdit(goal, null);
-		expect(buildSnapshot(context(m))).toBeUndefined();
+		expect(buildSnapshot(context(m), "recap")).toBeUndefined();
 	});
 	it("keeps goal after compaction, includes summary, excludes compacted raw answers", () => {
 		const m = SessionManager.inMemory();
@@ -278,7 +341,7 @@ describe("bounded session snapshot", () => {
 		const kept = user(m, "Current task");
 		m.appendCompaction("Summarized earlier progress", kept, 1000);
 		assistant(m, "Current answer");
-		const result = buildSnapshot(context(m))!;
+		const result = buildSnapshot(context(m), "recap")!;
 		expect(result.userCount).toBe(2);
 		expect(result.prompt).toContain("Build original feature");
 		expect(result.prompt).toContain("<context_summary>");
@@ -293,7 +356,7 @@ describe("bounded session snapshot", () => {
 		m.appendContextEdit(root, { content: "Abandoned goal replacement" });
 		m.branchWithSummary(root, "Branch transition summary");
 		user(m, "New path");
-		const result = buildSnapshot(context(m))!;
+		const result = buildSnapshot(context(m), "recap")!;
 		expect(result).toMatchObject({ goal: "Shared goal", userCount: 2 });
 		expect(result.prompt).toContain("Branch transition summary");
 		expect(result.prompt).toContain("New path");
@@ -306,20 +369,20 @@ describe("bounded session snapshot", () => {
 			ids.push(user(m, `user-${i}`));
 			assistant(m, `final-${i}`);
 		}
-		const before = buildSnapshot(context(m))!;
+		const before = buildSnapshot(context(m), "recap")!;
 		m.appendContextEdit(ids[1], { content: "edited outside the prompt window with plenty of detail" });
-		const after = buildSnapshot(context(m))!;
+		const after = buildSnapshot(context(m), "recap")!;
 		expect(after.prompt).toBe(before.prompt);
 		expect(after.inputKey).not.toBe(before.inputKey);
 	});
 	it("hashes injected bash executions into the freshness key", () => {
 		const m = SessionManager.inMemory();
 		user(m, "task");
-		const base = buildSnapshot(context(m))!.inputKey;
+		const base = buildSnapshot(context(m), "recap")!.inputKey;
 		m.appendMessage({ role: "bashExecution", command: "npm test", output: "all green", exitCode: 0, cancelled: false, truncated: false, timestamp: 5 });
-		const afterBash = buildSnapshot(context(m))!.inputKey;
+		const afterBash = buildSnapshot(context(m), "recap")!.inputKey;
 		expect(afterBash).not.toBe(base);
 		m.appendMessage({ role: "bashExecution", command: "npm test", output: "all green", exitCode: 1, cancelled: false, truncated: false, timestamp: 6 });
-		expect(buildSnapshot(context(m))!.inputKey).not.toBe(afterBash);
+		expect(buildSnapshot(context(m), "recap")!.inputKey).not.toBe(afterBash);
 	});
 });
