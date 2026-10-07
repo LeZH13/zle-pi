@@ -29,6 +29,8 @@ Then:
 
 Allowed commands Jev judged get a dim line under them in the transcript, e.g. `⛨ bash-guard: jev p=0.31 recoverable` or `jev p=0.60 allowed by user`. Blocked commands carry the score in their block reason.
 
+Only bash's call rendering is decorated; result rendering and other tools' renderers remain unchanged, including their collapse behavior.
+
 Without a Jev classifier the guard runs **rules-only**: every risky command escalates, and a one-time notice says how to enable Jev.
 
 Calibration from live scores: routine cleanups (`rm -rf node_modules`/`dist`, `find -delete`, `docker system prune`) score about 0.2–0.48 and pass. `rm -rf ~` (≈0.95), `DROP DATABASE` (≈0.84), `rm -rf .git` (≈0.72), `push --force main` (≈0.61), `reset --hard HEAD~5` (≈0.52), and `git clean -fd` (≈0.57) escalate; `git branch -D` (≈0.35) passes as reflog-recoverable. Lower `allowBelow` to be stricter.

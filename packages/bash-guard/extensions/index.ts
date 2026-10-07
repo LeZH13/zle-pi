@@ -261,7 +261,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	// context.lastComponent (a Text it mutates via setText), so delegate with a
 	// fresh component and compose a container whenever a score is present.
 	pi.registerToolRenderer((toolName, next) => {
-		if (toolName !== "bash") return undefined;
+		if (toolName !== "bash") return next();
 		const base = next();
 		const baseRenderCall = base?.renderCall;
 		if (!baseRenderCall) return base;
