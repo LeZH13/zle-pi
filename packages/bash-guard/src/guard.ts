@@ -8,7 +8,7 @@
  * no UI). The state sent to Jev is deliberately tiny: command, matched rule
  * reasons, cwd, and cheap git facts. Nothing else leaves the machine.
  */
-import type { BashGuardConfig } from "./config.js";
+import type { ApprovalMode, BashGuardConfig } from "./config.js";
 import type { Jev } from "./jev.js";
 import { redactSecrets } from "./redact.js";
 import type { RiskyMatch, RiskyScan } from "./rules.js";
@@ -58,6 +58,8 @@ export interface GuardDeps {
 	/** Cheap git facts for the Jev state; must tolerate non-repo directories. */
 	gitInfo(cwd: string): Promise<GitInfo>;
 	hasUI: boolean;
+	/** Effective escalation mode: deny blocks every escalation without dialogs. */
+	approvalMode: ApprovalMode;
 	select(title: string, options: readonly string[], opts?: { signal?: AbortSignal }): Promise<string | undefined>;
 	notify(message: string, type: "info" | "warning" | "error"): void;
 	/** Exact-command allowlist remembered for this session. */
@@ -85,8 +87,11 @@ function scoreFrom(probability: number | undefined): JevScore | undefined {
 
 export async function runGuard(deps: GuardDeps, input: GuardInput): Promise<GuardOutcome> {
 	const { command } = input;
+	const deny = deps.approvalMode === "deny";
 
-	if (deps.isSessionAllowed(command)) {
+	// Deny (from config or an enforced launch env) ignores restored human
+	// approvals from ask-mode sessions: they must never bypass it.
+	if (!deny && deps.isSessionAllowed(command)) {
 		return { action: "allow", reason: "allowed for this session" };
 	}
 
@@ -145,10 +150,19 @@ async function escalate(
 	probability: number | undefined,
 	jevDetail: string,
 ): Promise<GuardOutcome> {
+	const blockReason = `bash-guard: risky command - ${reasons} - ${jevDetail}`;
+	// Deny mode blocks immediately, before any UI or signal handling: no dialog
+	// is ever shown, and the reason names the mode so the agent can adapt.
+	if (deps.approvalMode === "deny") {
+		return {
+			action: "block",
+			reason: `${blockReason} (denied: approvalMode=deny blocks every escalation; session approvals are ignored)`,
+			verdict: "blocked",
+		};
+	}
 	if (input.signal?.aborted) {
 		return { action: "block", reason: `aborted before decision (${jevDetail})`, verdict: "blocked" };
 	}
-	const blockReason = `bash-guard: risky command - ${reasons} - ${jevDetail}`;
 	if (!deps.hasUI) {
 		return { action: "block", reason: `${blockReason} (no UI to confirm)`, verdict: "blocked" };
 	}

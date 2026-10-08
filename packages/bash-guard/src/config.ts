@@ -14,8 +14,12 @@ import { Value } from "typebox/value";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
+export type ApprovalMode = "ask" | "deny";
+
 export interface GuardConfig {
 	enabled: boolean;
+	/** Escalation behavior for risky commands: "ask" confirms with the user, "deny" blocks immediately. */
+	approvalMode: ApprovalMode;
 	/** Jev probability below which a risky command is allowed. */
 	allowBelow: number;
 	/** Extra user risky patterns (regex strings, matched against the full command). */
@@ -49,6 +53,7 @@ export interface BashGuardConfig {
 export const DEFAULT_CONFIG: BashGuardConfig = {
 	guard: {
 		enabled: true,
+		approvalMode: "ask",
 		allowBelow: 0.5,
 		extraRiskyPatterns: [],
 		allowPatterns: [],
@@ -70,6 +75,7 @@ const FileSchema = Type.Object({
 	guard: Type.Optional(
 		Type.Object({
 			enabled: Type.Optional(Type.Boolean()),
+			approvalMode: Type.Optional(Type.Union([Type.Literal("ask"), Type.Literal("deny")])),
 			allowBelow: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
 			extraRiskyPatterns: Type.Optional(Type.Array(Type.String())),
 			allowPatterns: Type.Optional(Type.Array(Type.String())),
@@ -128,6 +134,49 @@ export function mergeConfig(base: BashGuardConfig, override: PartialConfig): Bas
 		jev: { ...base.jev, ...(isPlainObject(override.jev) ? override.jev : {}) },
 	} as unknown as BashGuardConfig;
 	return merged;
+}
+
+/** Launch override for the escalation mode; a valid value beats the config file. */
+export const APPROVAL_MODE_ENV = "PI_BASH_GUARD_APPROVAL_MODE";
+
+export interface ApprovalModeResolution {
+	/** Effective escalation mode. */
+	mode: ApprovalMode;
+	/** True when a valid environment value decided the mode. */
+	envOverride: boolean;
+	/**
+	 * True when the guard must stay enabled no matter what config, flags, or
+	 * session toggles say: a valid env "deny" is enforced launch policy, and an
+	 * invalid env value fails closed rather than falling back to ask.
+	 */
+	envEnforced: boolean;
+	/** Non-empty when the environment value is invalid; the mode then fails closed to deny. */
+	error?: string;
+}
+
+/**
+ * Resolve the effective escalation mode from the config value and the launch
+ * environment override. The environment wins when valid; an invalid value is a
+ * hard error that fails closed (deny, guard pinned on) instead of asking.
+ */
+export function resolveApprovalMode(configured: ApprovalMode, envValue: string | undefined): ApprovalModeResolution {
+	const raw = envValue?.trim() ?? "";
+	if (raw === "") {
+		return { mode: configured, envOverride: false, envEnforced: false };
+	}
+	const value = raw.toLowerCase();
+	if (value === "ask") {
+		return { mode: "ask", envOverride: true, envEnforced: false };
+	}
+	if (value === "deny") {
+		return { mode: "deny", envOverride: true, envEnforced: true };
+	}
+	return {
+		mode: "deny",
+		envOverride: false,
+		envEnforced: true,
+		error: `Invalid ${APPROVAL_MODE_ENV} "${raw}" - expected "ask" or "deny"; failing closed in deny mode (risky commands are blocked, the guard stays enabled)`,
+	};
 }
 
 export interface LoadConfigOptions {

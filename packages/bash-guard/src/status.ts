@@ -3,8 +3,10 @@
  * a styler (`theme.fg`) so tests can assert plain text and the wiring can blend
  * with pi's default dimmed footer text.
  *
- * Shape: `⛨ BG [degraded label ·] <activity>`, where activity is the live
- * watchdog view while commands run and the guard tally otherwise.
+ * Shape: `⛨ BG <mode badge>[ · degraded label][ · <activity>]`. The badge is
+ * the guard's effective mode: "ask"/"deny" while the guard runs, "off"
+ * otherwise (including when only the watchdog runs, next to a "watch-only"
+ * label, so it never shows a misleading "ask").
  */
 import type { JevFailureReason } from "./jev.js";
 import type { WatchLive } from "./watchdog.js";
@@ -17,8 +19,8 @@ export interface GuardTally {
 }
 
 export interface BashGuardStatusState {
-	flagDisabled: boolean;
-	guardOn: boolean;
+	/** Effective guard mode shown in the badge; "off" also when only the watchdog runs. */
+	guardMode: "ask" | "deny" | "off";
 	watchdogOn: boolean;
 	jevAvailable: boolean;
 	/** Most recent Jev call failure; unset after a success. */
@@ -49,10 +51,9 @@ function prob(p: number): string {
 export function renderStatus(state: BashGuardStatusState, styler: StatusStyler): string {
 	const dim = (text: string): string => styler(text, "dim");
 	const warning = (text: string): string => styler(text, "warning");
-	const head = dim("⛨ BG");
 
-	if (state.flagDisabled || (!state.guardOn && !state.watchdogOn)) {
-		return `${head} ${dim("off")}`;
+	if (state.guardMode === "off" && !state.watchdogOn) {
+		return `${dim("⛨ BG")} ${dim("off")}`;
 	}
 
 	// Degraded label: at most one, most severe first.
@@ -62,12 +63,12 @@ export function renderStatus(state: BashGuardStatusState, styler: StatusStyler):
 	else if (state.watchdogOn && state.bashConflict) label = warning("⚠ bash conflict");
 	else if (state.jevFailure) label = warning(`jev ✗ ${state.jevFailure}`);
 	else if (!state.watchdogOn) label = dim("guard-only");
-	else if (!state.guardOn) label = dim("watch-only");
+	else if (state.guardMode === "off") label = dim("watch-only");
 
 	const activity = state.live && state.watchdogOn && !watchInert ? renderLive(state.live, dim, warning) : renderTally(state, dim, warning);
 
-	const parts = [label, activity].filter((part): part is string => part !== undefined);
-	return parts.length === 0 ? head : `${head} ${parts.join(dim(" · "))}`;
+	const parts = [dim(state.guardMode), label, activity].filter((part): part is string => part !== undefined);
+	return `${dim("⛨ BG")} ${parts.join(dim(" · "))}`;
 }
 
 function renderTally(
@@ -75,7 +76,7 @@ function renderTally(
 	dim: (text: string) => string,
 	warning: (text: string) => string,
 ): string | undefined {
-	if (!state.guardOn) return undefined;
+	if (state.guardMode === "off") return undefined;
 	const { passed, asked, blocked } = state.tally;
 	const chunks: string[] = [];
 	if (passed > 0) chunks.push(dim(`${passed}✓`));

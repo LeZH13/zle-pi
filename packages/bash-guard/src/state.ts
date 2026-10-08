@@ -1,38 +1,40 @@
 /**
- * Session-scoped toggle state and the exact-command allowlist.
+ * Session-scoped settings overrides and the exact-command allowlist.
  *
  * State travels as custom session entries on the branch, so it survives
  * resume, reload, compaction, and forking, and it never reaches the model.
- * Toggles are snapshots (last one wins); session allows accumulate as
+ * Settings are snapshots (last valid one wins); session allows accumulate as
  * individual entries so repeated "Allow for this session" stays compact.
  */
-export const TOGGLES_ENTRY_TYPE = "bash-guard-toggles";
+import type { ApprovalMode } from "./config.js";
+
+export const SETTINGS_ENTRY_TYPE = "bash-guard-settings";
 export const ALLOW_ENTRY_TYPE = "bash-guard-allow";
 
-export interface TogglesData {
-	guard: boolean;
-	watchdog: boolean;
+export type GuardMode = ApprovalMode | "off";
+
+/** Only explicitly selected values are saved; untouched settings keep using config. */
+export interface SessionSettings {
+	guard?: GuardMode;
+	watchdog?: boolean;
 }
 
 export interface AllowData {
 	command: string;
 }
 
-/** Minimal shape of the entries we read back from the session branch. */
-interface BranchEntry {
-	type?: unknown;
-	customType?: unknown;
-	data?: unknown;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readToggles(data: unknown): TogglesData | undefined {
+function readSettings(data: unknown): SessionSettings | undefined {
 	if (!isRecord(data)) return undefined;
-	if (typeof data.guard !== "boolean" || typeof data.watchdog !== "boolean") return undefined;
-	return { guard: data.guard, watchdog: data.watchdog };
+	if (data.guard !== undefined && data.guard !== "ask" && data.guard !== "deny" && data.guard !== "off") return undefined;
+	if (data.watchdog !== undefined && typeof data.watchdog !== "boolean") return undefined;
+	return {
+		...(data.guard !== undefined ? { guard: data.guard as GuardMode } : {}),
+		...(data.watchdog !== undefined ? { watchdog: data.watchdog } : {}),
+	};
 }
 
 function readAllow(data: unknown): string | undefined {
@@ -41,23 +43,23 @@ function readAllow(data: unknown): string | undefined {
 }
 
 export interface RestoredState {
-	toggles: TogglesData | undefined;
+	settings: SessionSettings | undefined;
 	allowedCommands: string[];
 }
 
 /**
- * Reconstruct state from the current branch, in order. Toggles: last wins.
+ * Reconstruct state from the current branch, in order. Settings: last valid wins.
  * Allows: unique commands, accumulated.
  */
 export function restoreState(branch: readonly unknown[]): RestoredState {
-	let toggles: TogglesData | undefined;
+	let settings: SessionSettings | undefined;
 	const allowed: string[] = [];
 	const seen = new Set<string>();
 	for (const entry of branch) {
 		if (!isRecord(entry) || entry.type !== "custom") continue;
 		switch (entry.customType) {
-			case TOGGLES_ENTRY_TYPE:
-				toggles = readToggles(entry.data);
+			case SETTINGS_ENTRY_TYPE:
+				settings = readSettings(entry.data) ?? settings;
 				break;
 			case ALLOW_ENTRY_TYPE: {
 				const command = readAllow(entry.data);
@@ -71,5 +73,5 @@ export function restoreState(branch: readonly unknown[]): RestoredState {
 				break;
 		}
 	}
-	return { toggles, allowedCommands: allowed };
+	return { settings, allowedCommands: allowed };
 }

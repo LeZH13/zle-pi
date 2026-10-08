@@ -6,7 +6,11 @@
  *   risky-pattern table, and asks Jev one noul question - "could this cause
  *   irreversible loss?" - only for risky commands. Anything below
  *   `allowBelow` passes; everything else escalates to a dialog (or blocks
- *   without a UI). Without any Jev classifier the table runs rules-only.
+ *   without a UI). In deny mode (`guard.approvalMode` or the
+ *   PI_BASH_GUARD_APPROVAL_MODE launch override) every escalation is blocked
+ *   without a dialog and restored session approvals are ignored; a valid env
+ *   deny pins the guard on. Without any Jev classifier the table runs
+ *   rules-only.
  *
  * - Watchdog (running bash): overrides the bash tool, wraps pi's local shell
  *   operations, keeps a bounded output tail per running command, and asks Jev
@@ -35,11 +39,19 @@ import {
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Text, type AutocompleteItem } from "@earendil-works/pi-tui";
-import { DEFAULT_CONFIG, loadConfig, type BashGuardConfig } from "../src/config.js";
+import {
+	APPROVAL_MODE_ENV,
+	DEFAULT_CONFIG,
+	loadConfig,
+	resolveApprovalMode,
+	type ApprovalMode,
+	type BashGuardConfig,
+} from "../src/config.js";
 import { formatGuardScore, runGuard, type GuardDeps, type GitInfo, type JevScore } from "../src/guard.js";
 import { createJev, type Jev } from "../src/jev.js";
 import { RISKY_RULES, compilePatterns, type RiskyScan } from "../src/rules.js";
-import { ALLOW_ENTRY_TYPE, restoreState, TOGGLES_ENTRY_TYPE } from "../src/state.js";
+import { publishRuntimeMarker, readPackageVersion } from "../src/runtime.js";
+import { ALLOW_ENTRY_TYPE, restoreState, SETTINGS_ENTRY_TYPE, type GuardMode, type SessionSettings } from "../src/state.js";
 import { renderStatus, type GuardTally, type StatusStyler } from "../src/status.js";
 import { Watchdog, type WatchCheckRecord } from "../src/watchdog.js";
 
@@ -47,7 +59,9 @@ const FLAG_NAME = "no-bash-guard";
 const COMMAND_NAME = "bash-guard";
 const STATUS_KEY = "bash-guard";
 
-const ARGUMENT_COMPLETIONS = ["status", "on", "off", "guard on", "guard off", "watchdog on", "watchdog off"];
+const VERSION = readPackageVersion(import.meta.url);
+
+const ARGUMENT_COMPLETIONS = ["ask", "deny", "off", "watchdog on", "watchdog off"];
 
 /** Bounded toolCallId → score-label map for the transcript score line. */
 const GUARD_SCORE_MAP_LIMIT = 512;
@@ -56,6 +70,10 @@ const GUARD_SCORE_MAP_LIMIT = 512;
 const STATUS_TICK_MS = 1000;
 
 export default function bashGuardExtension(pi: ExtensionAPI): void {
+	// Capability marker for embedded consumers: not-ready until session_start
+	// completes; replaced on reload; cleared on session_shutdown.
+	const runtime = publishRuntimeMarker(globalThis as Record<symbol, unknown>, VERSION);
+
 	pi.registerFlag(FLAG_NAME, {
 		description: "Disable the bash-guard guard and watchdog for this run",
 		type: "boolean",
@@ -66,8 +84,12 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let ui: ExtensionUIContext | undefined;
 	let config: BashGuardConfig = structuredClone(DEFAULT_CONFIG);
 	let configFiles: string[] = [];
-	let sessionGuard = true;
-	let sessionWatchdog = true;
+	let sessionSettings: SessionSettings = {};
+	let launchApprovalMode: string | undefined;
+	let approvalMode: ApprovalMode = "ask";
+	let approvalSource: "env" | "session" | "config" = "config";
+	let envEnforced = false;
+	let envError: string | undefined;
 	let allowedCommands = new Set<string>();
 	let currentRegistry: ModelRegistry | undefined;
 	let jev: Jev = createJev({
@@ -83,13 +105,56 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let risky: RiskyScan = { rules: RISKY_RULES, extra: [], allow: [] };
 	let tally: GuardTally = { passed: 0, asked: 0, blocked: 0 };
 	let statusTick: ReturnType<typeof setInterval> | undefined;
+	let runtimeReady = false;
 
 	const flagDisabled = (): boolean => pi.getFlag(FLAG_NAME) === true;
-	const guardOn = (): boolean => !flagDisabled() && config.guard.enabled && sessionGuard;
-	const watchdogOn = (): boolean => !flagDisabled() && config.watchdog.enabled && sessionWatchdog;
+	// Enforced launch policy: a valid env deny pins the guard on, and an invalid
+	// env value fails closed, so config, flags, and session toggles cannot turn
+	// the guard off. The watchdog stays independently toggleable.
+	const guardOn = (): boolean => envEnforced || (!flagDisabled() && config.guard.enabled && sessionSettings.guard !== "off");
+	const watchdogOn = (): boolean => !flagDisabled() && config.watchdog.enabled && (sessionSettings.watchdog ?? true);
+	const guardMode = (): GuardMode => (guardOn() ? approvalMode : "off");
+
+	/** Launch policy wins over a session selection, which wins over config. */
+	function resolvePolicy(): void {
+		const sessionMode = sessionSettings.guard === "ask" || sessionSettings.guard === "deny" ? sessionSettings.guard : undefined;
+		const resolved = resolveApprovalMode(sessionMode ?? config.guard.approvalMode, launchApprovalMode);
+		approvalMode = resolved.mode;
+		envEnforced = resolved.envEnforced;
+		envError = resolved.error;
+		approvalSource = resolved.envOverride || resolved.error ? "env" : sessionMode ? "session" : "config";
+	}
+
+	function restoreSession(ctx: ExtensionContext): void {
+		const restored = restoreState(ctx.sessionManager.getBranch());
+		sessionSettings = restored.settings ?? {};
+		allowedCommands = new Set(restored.allowedCommands);
+		resolvePolicy();
+	}
+
+	function syncWatchdog(ctx: ExtensionContext): void {
+		if (watchdogOn()) {
+			ensureBashOverride(ctx.cwd);
+			bashConflict = detectBashConflict();
+		} else {
+			watchdog?.dispose();
+			stopStatusTick();
+		}
+	}
 
 	function notifySafe(message: string, type: "info" | "warning" | "error"): void {
 		if (ui) ui.notify(message, type);
+	}
+
+	/** Keep the capability marker live: toggles change the effective guard state. */
+	function syncRuntime(): void {
+		runtime.set({
+			ready: runtimeReady,
+			approvalMode,
+			guardEnabled: guardOn(),
+			envEnforced,
+			...(envError ? { error: envError } : {}),
+		});
 	}
 
 	function steer(message: string): void {
@@ -120,8 +185,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			STATUS_KEY,
 			renderStatus(
 				{
-					flagDisabled: flagDisabled(),
-					guardOn: guardOn(),
+					guardMode: guardMode(),
 					watchdogOn: watchdogOn(),
 					jevAvailable: jev.available,
 					jevFailure: jev.lastFailure,
@@ -228,6 +292,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			risky,
 			gitInfo,
 			hasUI: ctx.hasUI,
+			approvalMode,
 			select: (title, options, opts) =>
 				ctx.ui.select(title, [...options], opts?.signal === undefined ? undefined : { signal: opts.signal }),
 			notify: (message, type) => {
@@ -335,10 +400,16 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			),
 		};
 
-		const restored = restoreState(ctx.sessionManager.getBranch());
-		sessionGuard = restored.toggles?.guard ?? true;
-		sessionWatchdog = restored.toggles?.watchdog ?? true;
-		allowedCommands = new Set(restored.allowedCommands);
+		launchApprovalMode = process.env[APPROVAL_MODE_ENV];
+		restoreSession(ctx);
+		if (envError) {
+			// A hard configuration failure: surfaced as an error, and the guard
+			// runs fail-closed in deny mode instead of falling back to prompts.
+			if (ctx.hasUI) ctx.ui.notify(`bash-guard: ${envError}`, "error");
+		}
+		else if (approvalSource === "env" && (configFiles.length > 0 || sessionSettings.guard !== undefined)) {
+			notifySafe(`bash-guard: ${APPROVAL_MODE_ENV}=${approvalMode} overrides the config/session approval mode`, "info");
+		}
 		jevOffNotified = false;
 		guardScores = new Map();
 		bashConflict = false;
@@ -376,21 +447,50 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			}
 		}
 		refreshStatus(ctx);
+		// Initialization completed: consumers may now trust the marker. Jev being
+		// unavailable does not block readiness - the rules-only guard is working.
+		runtimeReady = true;
+		syncRuntime();
+	});
+
+	pi.on("session_tree", (_event, ctx) => {
+		restoreSession(ctx);
+		syncWatchdog(ctx);
+		syncRuntime();
+		refreshStatus(ctx);
 	});
 
 	pi.on("session_shutdown", (_event, ctx) => {
 		stopStatusTick();
 		watchdog?.dispose();
 		currentRegistry = undefined;
+		runtimeReady = false;
+		runtime.clear();
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 
 	// --- /bash-guard command ---------------------------------------------------
 
+	/** The env launch policy cannot be bypassed by session toggles. */
+	function notifyEnforced(): void {
+		if (envEnforced) {
+			notifySafe(
+				envError
+					? `bash-guard: the guard stays on in deny mode - ${envError}`
+					: `bash-guard: the guard stays on in deny mode - enforced by ${APPROVAL_MODE_ENV}`,
+				"warning",
+			);
+		}
+	}
+
 	function statusLines(): string {
+		const approval = envError
+			? `approval: deny (fail closed - ${envError})`
+			: `approval: ${approvalMode} (${approvalSource}${envEnforced ? " enforced" : ""}${approvalSource === "env" ? ` via ${APPROVAL_MODE_ENV}` : ""})`;
 		const lines = [
-			`guard: ${guardOn() ? "on" : "off"} (config ${config.guard.enabled}, session ${sessionGuard}, flag ${flagDisabled() ? "off" : "on"})`,
-			`watchdog: ${watchdogOn() ? "on" : "off"} - tracking ${watchdog?.runningCount() ?? 0} command(s)` +
+			approval,
+			`guard: ${guardMode()} (config enabled ${config.guard.enabled}, session ${sessionSettings.guard ?? "default"}, flag ${flagDisabled() ? "off" : "on"})`,
+			`watchdog: ${watchdogOn() ? "on" : "off"} (config enabled ${config.watchdog.enabled}, session ${sessionSettings.watchdog === undefined ? "default" : sessionSettings.watchdog ? "on" : "off"}, flag ${flagDisabled() ? "off" : "on"}) - tracking ${watchdog?.runningCount() ?? 0} command(s)` +
 				(bashRegistered ? (bashConflict ? " - override lost to another extension" : " - bash override registered") : " - not overriding bash"),
 			`jev: ${jev.available ? "on" : "off"} - ${jev.available ? jev.model : jev.describeUnavailable()} (timeout ${config.jev.timeoutMs}ms)` +
 				(jev.lastFailure ? ` - last call failed: ${jev.lastFailure}` : ""),
@@ -423,70 +523,45 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Show or toggle bash-guard (guard + watchdog)",
+		description: "Show bash-guard status, set ask/deny/off, or toggle the watchdog",
 		getArgumentCompletions: (argumentPrefix: string): AutocompleteItem[] =>
 			ARGUMENT_COMPLETIONS.filter((argument) => argument.startsWith(argumentPrefix)).map((value) => ({ value, label: value })),
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
 			const tokens = args.trim().split(/\s+/).filter(Boolean);
 			const [head, tail] = tokens;
-			const apply = (): boolean => {
-				switch (head) {
-					case undefined: {
-						notifySafe(statusLines(), "info");
-						return false;
-					}
-					case "status": {
-						notifySafe(statusLines(), "info");
-						return false;
-					}
-					case "on": {
-						sessionGuard = true;
-						sessionWatchdog = true;
-						return true;
-					}
-					case "off": {
-						sessionGuard = false;
-						sessionWatchdog = false;
-						return true;
-					}
-					case "guard": {
-						if (tail === "on") sessionGuard = true;
-						else if (tail === "off") sessionGuard = false;
-						else {
-							notifySafe("usage: /bash-guard guard on|off", "warning");
-							return false;
-						}
-						return true;
-					}
-					case "watchdog": {
-						if (tail === "on") sessionWatchdog = true;
-						else if (tail === "off") sessionWatchdog = false;
-						else {
-							notifySafe("usage: /bash-guard watchdog on|off", "warning");
-							return false;
-						}
-						return true;
-					}
-					default: {
-						notifySafe("usage: /bash-guard [status|on|off|guard on|off|watchdog on|off]", "warning");
-						return false;
-					}
-				}
-			};
-
-			if (!apply()) {
+			if (tokens.length === 0) {
+				notifySafe(statusLines(), "info");
 				refreshStatus(ctx);
 				return;
 			}
-			pi.appendEntry(TOGGLES_ENTRY_TYPE, { guard: sessionGuard, watchdog: sessionWatchdog });
-			if (watchdogOn()) {
-				ensureBashOverride(ctx.cwd);
-				bashConflict = detectBashConflict();
+
+			if (tokens.length === 1 && (head === "ask" || head === "deny" || head === "off")) {
+				sessionSettings = { ...sessionSettings, guard: head };
+			} else if (tokens.length === 2 && head === "watchdog" && (tail === "on" || tail === "off")) {
+				sessionSettings = { ...sessionSettings, watchdog: tail === "on" };
 			} else {
-				watchdog?.dispose();
-				stopStatusTick();
+				notifySafe("usage: /bash-guard [ask|deny|off|watchdog on|off]", "warning");
+				return;
 			}
+
+			pi.appendEntry(SETTINGS_ENTRY_TYPE, { ...sessionSettings });
+			resolvePolicy();
+			syncRuntime();
+			syncWatchdog(ctx);
 			refreshStatus(ctx);
+
+			if (head === "off") notifyEnforced();
+			else if (head === "ask" || head === "deny") {
+				if (!guardOn()) {
+					notifySafe(`bash-guard: guard remains off - ${flagDisabled() ? "--no-bash-guard" : "guard.enabled=false in config"}`, "warning");
+				} else if (approvalMode !== head) {
+					if (envEnforced) notifyEnforced();
+					else notifySafe(`bash-guard: approval remains ${approvalMode} - set by ${APPROVAL_MODE_ENV}`, "warning");
+				}
+			} else if (tail === "on" && !watchdogOn()) {
+				notifySafe(`bash-guard: watchdog remains off - ${flagDisabled() ? "--no-bash-guard" : "watchdog.enabled=false in config"}`, "warning");
+			}
+			notifySafe(`Guard: ${guardMode()} · Watchdog: ${watchdogOn() ? "on" : "off"}`, "info");
 		},
 	});
 }

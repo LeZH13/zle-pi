@@ -33,6 +33,7 @@ function makeJev(result: GuardJevResult): Jev & { guardCalls: number } {
 
 function makeDeps(overrides: Partial<GuardDeps> & { jev: Jev }): GuardDeps {
 	const allowed = new Set<string>();
+	const { approvalMode = "ask", ...rest } = overrides;
 	return {
 		config: structuredClone(DEFAULT_CONFIG),
 		risky: { rules: RISKY_RULES, extra: [], allow: [] },
@@ -43,7 +44,8 @@ function makeDeps(overrides: Partial<GuardDeps> & { jev: Jev }): GuardDeps {
 		isSessionAllowed: (command) => allowed.has(command),
 		allowForSession: (command) => allowed.add(command),
 		notifyJevOffOnce: vi.fn(),
-		...overrides,
+		approvalMode,
+		...rest,
 	};
 }
 
@@ -283,5 +285,115 @@ describe("guard verdicts for the footer tally", () => {
 		expect(block.verdict).toBe("blocked");
 		const safe = await runGuard(makeDeps({ jev: makeJev({ ok: true, p: 0.1, model: "t" }) }), { command: SAFE_COMMAND, cwd: "/w" });
 		expect(safe.verdict).toBeUndefined();
+	});
+});
+
+describe("deny mode", () => {
+	const denyDeps = (overrides: Partial<GuardDeps> & { jev: Jev }): GuardDeps => makeDeps({ approvalMode: "deny", ...overrides });
+
+	it("blocks a high-risk command before any dialog, even with a UI", async () => {
+		const select = vi.fn();
+		const deps = denyDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }), select });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome.action).toBe("block");
+		expect(outcome.verdict).toBe("blocked");
+		expect(outcome.reason).toContain("approvalMode=deny");
+		expect(outcome.reason).toContain("git-push-force");
+		expect(outcome.reason).toContain("p=0.90");
+		expect(select).not.toHaveBeenCalled(); // no dialog in deny mode
+	});
+
+	it("blocks without a UI too, with the same reason", async () => {
+		const deps = denyDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }), hasUI: false });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome.action).toBe("block");
+		expect(outcome.reason).toContain("approvalMode=deny");
+		expect(outcome.reason).not.toContain("no UI");
+	});
+
+	it("still passes non-risky commands", async () => {
+		const jev = makeJev({ ok: true, p: 0.9, model: "t" });
+		const deps = denyDeps({ jev });
+		const outcome = await runGuard(deps, { command: SAFE_COMMAND, cwd: "/w" });
+		expect(outcome).toEqual({ action: "allow", reason: "no risky pattern matched" });
+		expect(jev.guardCalls).toBe(0);
+	});
+
+	it("still honors explicit allow patterns", async () => {
+		const deps = denyDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }), risky: { rules: RISKY_RULES, extra: [], allow: [/^git push --force/] } });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome).toEqual({ action: "allow", reason: "matched an allow pattern" });
+	});
+
+	it("still passes Jev low-probability (recoverable) commands", async () => {
+		const outcome = await runGuard(denyDeps({ jev: makeJev({ ok: true, p: 0.2, model: "t" }) }), { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome).toMatchObject({ action: "allow", verdict: "passed", jev: { p: 0.2, userApproved: false } });
+	});
+
+	it("ignores restored human session approvals", async () => {
+		const deps = denyDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }), isSessionAllowed: (command) => command === RISKY_COMMAND });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome.action).toBe("block");
+		expect(outcome.reason).toContain("session approvals are ignored");
+	});
+
+	it("never records new session approvals (no dialog can allow)", async () => {
+		const allowForSession = vi.fn();
+		const deps = denyDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }), allowForSession });
+		await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(allowForSession).not.toHaveBeenCalled();
+	});
+
+	it("blocks on Jev timeouts, errors, and unavailability", async () => {
+		const timeout = await runGuard(denyDeps({ jev: makeJev({ ok: false, reason: "timeout" }) }), { command: RISKY_COMMAND, cwd: "/w" });
+		expect(timeout.action).toBe("block");
+		expect(timeout.reason).toContain("Jev timeout");
+		expect(timeout.reason).toContain("denied");
+
+		const error = await runGuard(denyDeps({ jev: makeJev({ ok: false, reason: "error", detail: "boom" }) }), { command: RISKY_COMMAND, cwd: "/w" });
+		expect(error.action).toBe("block");
+		expect(error.reason).toContain("Jev error: boom");
+
+		const unavailable: Jev = {
+			available: false,
+			model: "",
+			async ensureAvailable() {
+				return false;
+			},
+			describeUnavailable: () => "no Jev classifier is available",
+			async guardAnswer() {
+				throw new Error("must not be called while unavailable");
+			},
+			async watchdogAnswer() {
+				throw new Error("not used");
+			},
+			usage: () => ({ input: 0, output: 0, totalTokens: 0, cost: 0 }),
+			lastFailure: undefined,
+		};
+		const deps = denyDeps({ jev: unavailable });
+		const off = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(off.action).toBe("block");
+		expect(off.reason).toContain("Jev is off");
+		expect(off.reason).toContain("denied");
+	});
+
+	it("blocks without a dialog when aborted mid-run", async () => {
+		const controller = new AbortController();
+		controller.abort();
+		const select = vi.fn();
+		const deps = denyDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }), select });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w", signal: controller.signal });
+		expect(outcome.action).toBe("block");
+		expect(select).not.toHaveBeenCalled();
+	});
+});
+
+describe("ask mode original behavior", () => {
+	it("still honors session approvals and dialogs in ask mode", async () => {
+		const select = vi.fn(async () => "Allow once");
+		const deps = makeDeps({ jev: makeJev({ ok: true, p: 0.9, model: "t" }), select });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome.action).toBe("allow");
+		expect(select).toHaveBeenCalledTimes(1);
 	});
 });
