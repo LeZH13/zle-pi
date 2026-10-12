@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { formatGuardScore, runGuard, SELECT_OPTIONS, type GuardDeps, type GitInfo } from "../src/guard.js";
-import type { GuardJevResult, Jev } from "../src/jev.js";
+import { createJev, type GuardJevResult, type Jev } from "../src/jev.js";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { RISKY_RULES } from "../src/rules.js";
 
 const RISKY_COMMAND = "git push --force origin main";
@@ -50,6 +51,32 @@ function makeDeps(overrides: Partial<GuardDeps> & { jev: Jev }): GuardDeps {
 }
 
 describe("guard decision flow", () => {
+	it("aborts a risky command during stalled registry availability without escalation", async () => {
+		const started = Promise.withResolvers<void>();
+		let probeSignal!: AbortSignal;
+		const registry = {
+			getAvailableOfType: vi.fn(async (_type, _provider, options) => {
+				probeSignal = options.signal;
+				started.resolve();
+				return new Promise(() => {});
+			}),
+			classify: vi.fn(),
+		};
+		const jev = createJev({ getRegistry: () => registry as unknown as ModelRegistry, timeoutMs: 6000 });
+		const deps = makeDeps({ jev, gitInfo: vi.fn() });
+		const controller = new AbortController();
+		const pending = runGuard(deps, { command: RISKY_COMMAND, cwd: "/w", signal: controller.signal });
+		await started.promise;
+		controller.abort();
+		expect(await pending).toMatchObject({ action: "block", reason: expect.stringContaining("aborted") });
+		expect(probeSignal.aborted).toBe(true);
+		expect(registry.getAvailableOfType).toHaveBeenCalledTimes(1);
+		expect(registry.classify).not.toHaveBeenCalled();
+		expect(deps.gitInfo).not.toHaveBeenCalled();
+		expect(deps.select).not.toHaveBeenCalled();
+		expect(deps.notifyJevOffOnce).not.toHaveBeenCalled();
+	});
+
 	it("allows non-risky commands without asking Jev", async () => {
 		const jev = makeJev({ ok: true, p: 0.9, model: "t" });
 		const deps = makeDeps({ jev });

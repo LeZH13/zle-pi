@@ -79,6 +79,27 @@ afterEach(() => {
 });
 
 describe("watchdog state machine", () => {
+	it.each(["finish", "dispose"] as const)("aborts pending availability on %s and never classifies an inactive entry", async (stop) => {
+		const h = setup({ status: "stuck", pStatus: 0.95, persistent: 0 });
+		let probeSignal!: AbortSignal;
+		let finishProbe!: (available: boolean) => void;
+		h.jev.ensureAvailable = vi.fn(async (signal?: AbortSignal) => {
+			probeSignal = signal!;
+			return new Promise<boolean>((resolve) => { finishProbe = resolve; });
+		});
+		const answer = vi.spyOn(h.jev, "watchdogAnswer");
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(probeSignal.aborted).toBe(false);
+		if (stop === "finish") h.watchdog.finish(h.entry);
+		else h.watchdog.dispose();
+		expect(probeSignal.aborted).toBe(true);
+		finishProbe(true); // Non-cooperative late availability must not start a request.
+		await vi.advanceTimersByTimeAsync(0);
+		expect(answer).not.toHaveBeenCalled();
+		expect(h.steer).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it("does nothing on a healthy first check", async () => {
 		const h = setup({ status: "progressing", pStatus: 0.95, persistent: 0.1 });
 		await vi.advanceTimersByTimeAsync(FIRST_MS);

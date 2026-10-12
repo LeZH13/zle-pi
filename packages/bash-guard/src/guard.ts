@@ -105,7 +105,11 @@ export async function runGuard(deps: GuardDeps, input: GuardInput): Promise<Guar
 
 	const reasons = reasonList(scan.matches);
 
-	if (!(await deps.jev.ensureAvailable())) {
+	const available = await deps.jev.ensureAvailable(input.signal);
+	if (input.signal?.aborted) {
+		return { action: "block", reason: "aborted before decision (Jev availability)", verdict: "blocked" };
+	}
+	if (!available) {
 		deps.notifyJevOffOnce();
 		return escalate(deps, input, reasons, undefined, `Jev is off: ${deps.jev.describeUnavailable()}`);
 	}

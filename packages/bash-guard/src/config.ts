@@ -6,8 +6,8 @@
  * with TypeBox; anything invalid falls back to defaults so a typo can never break
  * the guard open or shut silently.
  *
- * Classifier credentials come from pi's own auth (/login or the provider's API
- * key env); there is no credential key in this config.
+ * Registry classifiers use pi's own auth. An optional System One endpoint uses
+ * an explicit literal API key or a whole-value environment reference.
  */
 import { Type } from "typebox";
 import { Value } from "typebox/value";
@@ -38,10 +38,22 @@ export interface WatchdogConfig {
 	agreeChecks: number;
 }
 
+export interface JevEndpointConfig {
+	/** HTTP(S) System One base URL, without URL credentials. */
+	baseUrl: string;
+	/** Literal API key, "$NAME", or "${NAME}"; shell commands are not supported. */
+	apiKey: string;
+	/** Ordered wire model IDs; omitted = jev-latest, then jev-1.13.0. */
+	models?: string[];
+}
+
 export interface JevConfig {
+	/** Timeout budget for each classifier attempt. */
 	timeoutMs: number;
-	/** "provider/modelId" (e.g. "openrouter/~typesafe/jev-latest"); unset = auto-detect. */
+	/** "provider/modelId" (e.g. "openrouter/~typesafe/jev-latest"); unset = auto-detect and fail over. */
 	model?: string;
+	/** Tried before registry candidates in auto mode; mutually exclusive with model. */
+	endpoint?: JevEndpointConfig;
 }
 
 export interface BashGuardConfig {
@@ -66,7 +78,7 @@ export const DEFAULT_CONFIG: BashGuardConfig = {
 		agreeChecks: 2,
 	},
 	jev: {
-		timeoutMs: 3000,
+		timeoutMs: 6000,
 		model: undefined,
 	},
 };
@@ -92,8 +104,15 @@ const FileSchema = Type.Object({
 	),
 	jev: Type.Optional(
 		Type.Object({
-			timeoutMs: Type.Optional(Type.Number({ minimum: 200 })),
+			timeoutMs: Type.Optional(Type.Integer({ minimum: 200, maximum: 2_147_483_647 })),
 			model: Type.Optional(Type.String({ pattern: "^[^/]+/.+" })),
+			endpoint: Type.Optional(
+				Type.Object({
+					baseUrl: Type.String({ minLength: 1 }),
+					apiKey: Type.String({ pattern: "^(?:\\$(?:[A-Za-z_][A-Za-z0-9_]*|\\{[A-Za-z_][A-Za-z0-9_]*\\})|[^$!\\s][^$\\s]*)$" }),
+					models: Type.Optional(Type.Array(Type.String({ minLength: 1, pattern: "^\\S+$" }), { minItems: 1 })),
+				}, { additionalProperties: false }),
+			),
 		}),
 	),
 });
@@ -120,13 +139,31 @@ function readJsonFile(
 		const parsed: unknown = JSON.parse(raw);
 		if (!isPlainObject(parsed)) throw new Error("not a JSON object");
 		return parsed as PartialConfig;
-	} catch (error) {
-		onError?.(`Invalid JSON in ${path}: ${error instanceof Error ? error.message : String(error)}`);
+	} catch {
+		// JSON parser errors can quote the input, including a literal endpoint key.
+		onError?.(`Invalid JSON in ${path}: expected a JSON object`);
 		return undefined;
 	}
 }
 
-/** Deep-merge section objects; scalars and arrays are replaced, not merged. */
+function validConfig(value: unknown): boolean {
+	if (!Value.Check(FileSchema, value)) return false;
+	const jev = (value as Partial<BashGuardConfig>).jev;
+	if (jev?.model !== undefined && jev.endpoint !== undefined) return false;
+	if (jev?.endpoint !== undefined) {
+		if (/\s/.test(jev.endpoint.apiKey) || jev.endpoint.models?.some((id) => /\s/.test(id))) return false;
+		try {
+			const baseUrl = jev.endpoint.baseUrl;
+			const url = new URL(baseUrl);
+			if (!/^https?:\/\//i.test(baseUrl) || baseUrl !== baseUrl.trim() || url.username || url.password) return false;
+		} catch {
+			return false;
+		}
+	}
+	return true;
+}
+
+/** Merge section objects; nested endpoint objects, scalars, and arrays are replaced. */
 export function mergeConfig(base: BashGuardConfig, override: PartialConfig): BashGuardConfig {
 	const merged: BashGuardConfig = {
 		guard: { ...base.guard, ...(isPlainObject(override.guard) ? override.guard : {}) },
@@ -210,7 +247,7 @@ export function loadConfig(options: LoadConfigOptions): { config: BashGuardConfi
 	const userPath = userConfigPath(agentDir);
 	const userFile = readJsonFile(userPath, options.readFile, options.onError);
 	if (userFile) {
-		if (Value.Check(FileSchema, userFile)) {
+		if (validConfig(userFile)) {
 			files.push(userPath);
 			merged = mergeConfig(merged, userFile);
 		} else {
@@ -220,7 +257,7 @@ export function loadConfig(options: LoadConfigOptions): { config: BashGuardConfi
 	const projectPath = projectConfigPath(options.projectDir);
 	const projectFile = readJsonFile(projectPath, options.readFile, options.onError);
 	if (projectFile) {
-		if (Value.Check(FileSchema, projectFile)) {
+		if (validConfig(projectFile)) {
 			files.push(projectPath);
 			merged = mergeConfig(merged, projectFile);
 		} else {
@@ -228,9 +265,9 @@ export function loadConfig(options: LoadConfigOptions): { config: BashGuardConfi
 		}
 	}
 
-	// Two individually valid files can still merge to something invalid (e.g. a
-	// number in one and a string in the other for the same key): fail to defaults.
-	if (!Value.Check(FileSchema, merged)) {
+	// Individually valid files can combine a model pin and an endpoint. Reject
+	// that ambiguity too, without printing either endpoint credentials or URL.
+	if (!validConfig(merged)) {
 		options.onError?.("Invalid merged bash-guard config, using defaults");
 		return { config: structuredClone(DEFAULT_CONFIG), files };
 	}

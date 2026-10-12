@@ -1,21 +1,15 @@
 /**
- * The Jev transport, built on pi's built-in classifier API
- * (`ctx.modelRegistry.classify`) instead of a direct SDK, so the user's existing
- * pi credentials work: `/login`, TYPESAFE_API_KEY, OPENROUTER_API_KEY, etc.
- *
- * `classify` never rejects: every outcome travels through `stopReason`, so all
- * failures are translated into reason codes and callers route them to a decision
- * (guard escalates, watchdog treats the check as neutral and forgetful). Caller
- * cancellation is still visible as an `aborted` result, never as a verdict.
- *
- * The model resolves lazily: `jev.model` is "provider/modelId" (for example
- * "openrouter/~typesafe/jev-latest"); unset, the first available Jev classifier
- * in preference order is used. Resolution re-runs on demand (for example after
- * `/login`), and a configured model that is unavailable never falls back to
- * another provider.
+ * Jev transport: registry candidates retain pi's request-time authentication;
+ * an explicit endpoint uses the SDK's native System One classifier directly.
+ * Auto mode tries each available candidate once per decision, in preference
+ * order, on errors, timeouts, or malformed answers. A valid verdict (at any
+ * probability) ends the search. Model pins never use aliases or failover.
  */
 import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierQuestion, ClassifierResult } from "@earendil-works/pi-ai";
+import { classify } from "@earendil-works/pi-ai/api/typesafe-system-one";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import type { JevEndpointConfig } from "./config.js";
+import { redactSecrets } from "./redact.js";
 
 /** Watchdog statuses Jev may report. */
 export type WatchdogStatus = "progressing" | "waiting" | "stuck" | "looping";
@@ -61,36 +55,41 @@ export interface JevUsage {
 
 export interface JevDeps {
 	getRegistry(): ModelRegistry | undefined;
-	/** Configured model as "provider/modelId"; undefined enables auto-detection. */
+	/** Configured model as "provider/modelId"; undefined enables auto mode. */
 	modelSpec?: string;
+	/** Explicit System One endpoint, before registry candidates; excludes modelSpec. */
+	endpoint?: JevEndpointConfig;
 	timeoutMs: number;
 }
 
 export interface Jev {
 	/** Last known availability; `ensureAvailable()` re-resolves lazily. */
 	readonly available: boolean;
-	/** "provider/modelId" of the resolved model, or "" when none is resolved. */
+	/** Last successful (or initially resolved) "provider/modelId", without credentials. */
 	readonly model: string;
-	ensureAvailable(): Promise<boolean>;
+	ensureAvailable(signal?: AbortSignal): Promise<boolean>;
 	/** Why Jev is off, and how to enable it. Empty string when available. */
 	describeUnavailable(): string;
 	guardAnswer(state: unknown, signal?: AbortSignal): Promise<GuardJevResult>;
 	watchdogAnswer(state: unknown, signal?: AbortSignal): Promise<WatchdogJevResult>;
-	/** Session totals from classifier calls that reported usage. */
+	/** Session totals from all classifier attempts that reported usage. */
 	usage(): JevUsage;
-	/** Reason of the most recent failed call; cleared by the next answer. Caller aborts never set it. */
+	/** Reason of the most recent failed decision; cleared by the next answer. Caller aborts never set it. */
 	readonly lastFailure: JevFailureReason | undefined;
 }
 
-/** Jev models in preference order; Clef/llama classifier models are excluded. */
-export const JEV_PREFERENCES: readonly { provider: string; modelId: string }[] = [
+/** Jev models in preference order; aliases derive from an authenticated template. */
+export const JEV_PREFERENCES: readonly { provider: string; modelId: string; templateId?: string }[] = [
 	{ provider: "typesafe", modelId: "jev-latest" },
+	{ provider: "typesafe", modelId: "jev-1.13.0", templateId: "jev-latest" },
 	{ provider: "openrouter", modelId: "~typesafe/jev-latest" },
 	{ provider: "openrouter", modelId: "typesafe/jev-1.13" },
 	{ provider: "opencode", modelId: "jev-1.13" },
 	{ provider: "vercel-ai-gateway", modelId: "typesafe-ai/jev" },
 	{ provider: "cloudflare-workers-ai", modelId: "typesafe/jev" },
 ];
+
+export const JEV_ENDPOINT_MODELS: readonly string[] = ["jev-latest", "jev-1.13.0"];
 
 const GUARD_QUESTION = {
 	type: "bool",
@@ -134,28 +133,57 @@ function isProbability(value: unknown): value is number {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
-function failureOf(result: ClassifierResult, timedOut: boolean): JevFailure {
-	if (result.stopReason === "aborted") {
-		return timedOut ? { ok: false, reason: "timeout" } : { ok: false, reason: "aborted" };
-	}
-	if (result.stopReason === "error") {
-		return { ok: false, reason: "error", detail: result.errorMessage ?? undefined };
-	}
+function failureOf(result: ClassifierResult): JevFailure {
+	if (result.stopReason === "aborted") return { ok: false, reason: "aborted" };
+	if (result.stopReason === "error") return { ok: false, reason: "error", detail: result.errorMessage ?? undefined };
 	return { ok: false, reason: "unknown" };
 }
 
-interface Resolution {
+interface CandidateModel {
 	model: ClassifierModel<ClassifierApi>;
-	/** "provider/modelId". */
+	/** Redacted "provider/modelId", never an endpoint URL. */
 	label: string;
-	configured: boolean;
+}
+
+type Candidate = CandidateModel & (
+	| { source: "registry"; registry: ModelRegistry }
+	| { source: "endpoint"; apiKey: string }
+);
+
+/** Bound work even if a provider doesn't promptly settle after cancellation. */
+async function untilAbort<T>(pending: Promise<T>, signal: AbortSignal, failure: () => JevFailure): Promise<T | JevFailure> {
+	let onAbort!: () => void;
+	const interrupted = new Promise<JevFailure>((resolve) => {
+		onAbort = () => resolve(failure());
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		return await Promise.race([pending, interrupted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
 }
 
 export function createJev(deps: JevDeps): Jev {
-	let resolved: Resolution | undefined;
-	let configuredMissing: { provider: string; modelId: string } | undefined;
+	let resolved: Candidate | undefined;
 	let usageTotals: JevUsage = { input: 0, output: 0, totalTokens: 0, cost: 0 };
 	let lastFailure: JevFailureReason | undefined;
+	// Retain observed endpoint keys so even a late response after key rotation is safe.
+	const secrets = new Set<string>();
+	if (deps.endpoint?.apiKey) secrets.add(deps.endpoint.apiKey);
+
+	function sanitize(text: string): string {
+		for (const secret of secrets) {
+			text = text.replaceAll(secret, "[REDACTED]");
+			try {
+				text = text.replaceAll(encodeURIComponent(secret), "[REDACTED]");
+			} catch {
+				// A malformed Unicode key still gets literal redaction.
+			}
+		}
+		return redactSecrets(text);
+	}
 
 	function track<T extends GuardJevResult | WatchdogJevResult>(result: T): T {
 		if (result.ok) lastFailure = undefined;
@@ -164,55 +192,98 @@ export function createJev(deps: JevDeps): Jev {
 	}
 
 	function labelOf(model: ClassifierModel<ClassifierApi>): string {
-		return `${model.provider}/${model.id}`;
+		return sanitize(`${model.provider}/${model.id}`);
 	}
 
-	async function ensureAvailable(): Promise<boolean> {
+	function endpointCandidates(): Candidate[] {
+		const endpoint = deps.endpoint;
+		if (!endpoint || /\s/.test(endpoint.apiKey)) return [];
+		const reference = /^\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})$/.exec(endpoint.apiKey);
+		// Only whole-value references are supported; never send an unresolved placeholder.
+		if (!reference && (endpoint.apiKey.includes("$") || endpoint.apiKey.startsWith("!"))) return [];
+		const apiKey = reference ? process.env[(reference[1] ?? reference[2])!] : endpoint.apiKey;
+		if (!apiKey?.trim() || apiKey.includes("$")) return [];
+		secrets.add(apiKey);
+		return [...new Set(endpoint.models ?? JEV_ENDPOINT_MODELS)].map((id) => {
+			const model: ClassifierModel<"typesafe-system-one"> = {
+				type: "classifier",
+				provider: "endpoint",
+				api: "typesafe-system-one",
+				id,
+				name: id,
+				baseUrl: endpoint.baseUrl,
+				input: ["text"],
+				contextWindow: 128_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			};
+			return { source: "endpoint", model, label: labelOf(model), apiKey };
+		});
+	}
+
+	async function* resolveCandidates(signal?: AbortSignal): AsyncGenerator<Candidate> {
+		if (signal?.aborted || (deps.modelSpec !== undefined && deps.endpoint !== undefined)) return;
+		if (deps.modelSpec === undefined) {
+			for (const candidate of endpointCandidates()) {
+				if (signal?.aborted) return;
+				yield candidate;
+			}
+		}
+		if (signal?.aborted) return;
 		const registry = deps.getRegistry();
-		if (!registry) return false;
-		if (resolved) {
-			// Cheap catalog re-check; a vanished model triggers re-resolution.
-			if (registry.getModelOfType("classifier", resolved.model.provider, resolved.model.id)) return true;
-			resolved = undefined;
-		}
-		if (deps.modelSpec !== undefined) {
-			const spec = parseModelSpec(deps.modelSpec);
-			if (!spec) return false;
+		if (!registry) return;
+		const availableByProvider = new Map<string, readonly ClassifierModel<ClassifierApi>[]>();
+		async function availableFor(provider: string): Promise<readonly ClassifierModel<ClassifierApi>[]> {
+			const cached = availableByProvider.get(provider);
+			if (cached) return cached;
+			const deadline = new AbortController();
+			const probeSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+			const timer = setTimeout(() => deadline.abort(), deps.timeoutMs);
 			try {
-				const available = await registry.getAvailableOfType("classifier", spec.provider);
-				const found = available.find((model) => model.id === spec.modelId);
-				if (found) {
-					resolved = { model: found, label: deps.modelSpec, configured: true };
-					configuredMissing = undefined;
-					return true;
-				}
-			} catch {
-				// Auth probing failed; report unavailable rather than guessing.
-			}
-			configuredMissing = spec;
-			return false;
-		}
-		for (const preference of JEV_PREFERENCES) {
-			try {
-				const available = await registry.getAvailableOfType("classifier", preference.provider);
-				const found = available.find((model) => model.id === preference.modelId);
-				if (found) {
-					resolved = { model: found, label: `${preference.provider}/${preference.modelId}`, configured: false };
-					return true;
-				}
-			} catch {
-				// Try the next provider.
+				const pending = (async () => {
+					if (probeSignal.aborted) return [];
+					try {
+						return await registry!.getAvailableOfType("classifier", provider, { signal: probeSignal });
+					} catch {
+						return []; // Unavailable auth must not disable other providers.
+					}
+				})();
+				const result = await untilAbort(pending, probeSignal, () => ({ ok: false, reason: signal?.aborted ? "aborted" : "timeout" }));
+				// Only the winning probe result enters the cache; late auth output
+				// cannot update availability or the selected status model.
+				const available = probeSignal.aborted || !Array.isArray(result) ? [] : result;
+				availableByProvider.set(provider, available);
+				return available;
+			} finally {
+				clearTimeout(timer);
 			}
 		}
-		return false;
+		const pin = deps.modelSpec === undefined ? undefined : parseModelSpec(deps.modelSpec);
+		if (deps.modelSpec !== undefined && !pin) return;
+		for (const preference of pin ? [pin] : JEV_PREFERENCES) {
+			if (signal?.aborted) break;
+			const available = await availableFor(preference.provider);
+			if (signal?.aborted) return;
+			const templateId = "templateId" in preference ? preference.templateId : undefined;
+			let model = available.find((model) => model.id === (templateId ?? preference.modelId));
+			if (templateId) {
+				// Only the native TypeSafe System One model can supply this wire alias.
+				if (model?.provider !== "typesafe" || model.api !== "typesafe-system-one") continue;
+				model = { ...model, id: preference.modelId };
+			}
+			if (model) yield { source: "registry", registry, model, label: labelOf(model) };
+		}
 	}
 
-	function combinedSignal(callSignal: AbortSignal | undefined): { signal: AbortSignal; timedOut(): boolean } {
-		const timeout = AbortSignal.timeout(deps.timeoutMs);
-		if (callSignal === undefined) {
-			return { signal: timeout, timedOut: () => timeout.aborted };
+	async function ensureAvailable(signal?: AbortSignal): Promise<boolean> {
+		for await (const candidate of resolveCandidates(signal)) {
+			if (signal?.aborted) return false;
+			// Keep the last successful label (including wire aliases) without
+			// probing unused fallback providers merely to refresh status.
+			resolved ??= candidate;
+			return true;
 		}
-		return { signal: AbortSignal.any([callSignal, timeout]), timedOut: () => timeout.aborted };
+		if (!signal?.aborted) resolved = undefined;
+		return false;
 	}
 
 	function addUsage(result: ClassifierResult): void {
@@ -226,26 +297,63 @@ export function createJev(deps: JevDeps): Jev {
 		};
 	}
 
-	async function ask(
+	async function attempt(candidate: Candidate, context: ClassifierContext, signal?: AbortSignal): Promise<ClassifierResult | JevFailure> {
+		const deadline = new AbortController();
+		const callSignal = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal;
+		const interruption = (): JevFailure => ({ ok: false, reason: signal?.aborted ? "aborted" : "timeout" });
+		const timer = setTimeout(() => deadline.abort(), deps.timeoutMs);
+		const pending = (async (): Promise<ClassifierResult | JevFailure> => {
+			try {
+				if (callSignal.aborted) return interruption();
+				const options = { signal: callSignal, timeoutMs: deps.timeoutMs, maxRetries: 0 };
+				const result = candidate.source === "endpoint"
+					? await classify(candidate.model, context, { ...options, apiKey: candidate.apiKey })
+					: await candidate.registry.classify(candidate.model, context, options);
+				// Include billed failures, malformed answers, and late cancelled results.
+				addUsage(result);
+				if (callSignal.aborted) return interruption();
+				return result;
+			} catch (error) {
+				if (callSignal.aborted) return interruption();
+				return { ok: false, reason: "error", detail: sanitize(error instanceof Error ? error.message : String(error)) };
+			}
+		})();
+		try {
+			return await untilAbort(pending, callSignal, interruption);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	async function ask<T extends GuardJevAnswer | WatchdogJevAnswer>(
 		state: unknown,
 		questions: Record<string, ClassifierQuestion>,
 		signal: AbortSignal | undefined,
-	): Promise<ClassifierResult | JevFailure> {
-		if (resolved === undefined && !(await ensureAvailable())) {
-			return { ok: false, reason: "error", detail: "no Jev classifier available" };
+		answerOf: (result: ClassifierResult, model: string) => T | JevFailure,
+	): Promise<T | JevFailure> {
+		const aborted = (): JevFailure => ({ ok: false, reason: "aborted" });
+		if (signal?.aborted) return aborted();
+		let found = false;
+		let failure: JevFailure = { ok: false, reason: "error", detail: "no Jev classifier available" };
+		for await (const candidate of resolveCandidates(signal)) {
+			if (signal?.aborted) return aborted();
+			found = true;
+			resolved ??= candidate;
+			const result = await attempt(candidate, { state: state as ClassifierContext["state"], questions }, signal);
+			if (signal?.aborted) return aborted();
+			const answer = "ok" in result ? result
+				: result.stopReason !== "stop" ? failureOf(result)
+				: answerOf(result, candidate.label);
+			if (answer.ok) {
+				resolved = candidate;
+				return answer;
+			}
+			if (answer.reason === "aborted") return answer;
+			failure = answer.detail === undefined ? answer : { ...answer, detail: sanitize(answer.detail) };
 		}
-		const registry = deps.getRegistry();
-		const model = resolved?.model;
-		if (!registry || !model) return { ok: false, reason: "error", detail: "no Jev classifier available" };
-		const { signal: callSignal, timedOut } = combinedSignal(signal);
-		const result = await registry.classify(
-			model,
-			{ state: state as ClassifierContext["state"], questions },
-			{ signal: callSignal },
-		);
-		addUsage(result);
-		if (result.stopReason !== "stop") return failureOf(result, timedOut());
-		return result;
+		if (signal?.aborted) return aborted();
+		if (!found) resolved = undefined;
+		return failure;
 	}
 
 	return {
@@ -258,51 +366,49 @@ export function createJev(deps: JevDeps): Jev {
 		ensureAvailable,
 		describeUnavailable(): string {
 			if (resolved) return "";
-			if (configuredMissing) {
-				return `configured classifier ${configuredMissing.provider}/${configuredMissing.modelId} is not available - check its credentials (/login ${configuredMissing.provider} or its API key env)`;
+			if (deps.modelSpec !== undefined && deps.endpoint !== undefined) return "jev.model and jev.endpoint are mutually exclusive";
+			if (deps.modelSpec !== undefined) {
+				const spec = parseModelSpec(deps.modelSpec);
+				if (spec) return sanitize(`configured classifier ${deps.modelSpec} is not available - check its credentials (/login ${spec.provider} or its API key env)`);
 			}
-			return "no Jev classifier is available - run `/login openrouter` or set TYPESAFE_API_KEY / OPENROUTER_API_KEY";
+			return `${deps.endpoint ? "configured Jev endpoint is unavailable - check jev.endpoint.apiKey and its environment variable; " : ""}no Jev classifier is available - run \`/login openrouter\` or set TYPESAFE_API_KEY / OPENROUTER_API_KEY`;
 		},
 		get lastFailure(): JevFailureReason | undefined {
 			return lastFailure;
 		},
-		guardAnswer: async (state, signal) => track(await guardAnswer(state, signal)),
-		watchdogAnswer: async (state, signal) => track(await watchdogAnswer(state, signal)),
+		guardAnswer: async (state, signal) => track(await ask(state, { irreversible: GUARD_QUESTION }, signal, guardAnswerOf)),
+		watchdogAnswer: async (state, signal) => track(await ask(state, WATCHDOG_QUESTIONS, signal, watchdogAnswerOf)),
 		usage(): JevUsage {
 			return { ...usageTotals };
 		},
 	};
+}
 
-	async function guardAnswer(state: unknown, signal: AbortSignal | undefined): Promise<GuardJevResult> {
-		const result = await ask(state, { irreversible: GUARD_QUESTION }, signal);
-		if (!("answers" in result)) return result;
-		const answer = result.answers.irreversible;
-		if (answer?.type !== "bool" || !isProbability(answer.probability)) return { ok: false, reason: "malformed" };
-		return { ok: true, p: answer.probability, model: `${result.provider}/${result.model}` };
-	}
+function guardAnswerOf(result: ClassifierResult, model: string): GuardJevResult {
+	const answer = result.answers?.irreversible;
+	if (answer?.type !== "bool" || !isProbability(answer.probability)) return { ok: false, reason: "malformed" };
+	return { ok: true, p: answer.probability, model };
+}
 
-	async function watchdogAnswer(state: unknown, signal: AbortSignal | undefined): Promise<WatchdogJevResult> {
-		const result = await ask(state, WATCHDOG_QUESTIONS, signal);
-		if (!("answers" in result)) return result;
-		const statusAnswer = result.answers.status;
-		if (statusAnswer?.type !== "choice" || !WATCHDOG_STATUSES.includes(statusAnswer.choice as WatchdogStatus)) {
-			return { ok: false, reason: "malformed" };
-		}
-		const pStatus = (statusAnswer.probabilities as Record<string, unknown> | undefined)?.[statusAnswer.choice];
-		if (!isProbability(pStatus)) return { ok: false, reason: "malformed" };
-		const persistent = result.answers.persistent;
-		if (persistent?.type !== "bool" || !isProbability(persistent.probability)) return { ok: false, reason: "malformed" };
-		const probabilities: Record<string, number> = {};
-		for (const [label, value] of Object.entries(statusAnswer.probabilities ?? {})) {
-			if (isProbability(value)) probabilities[label] = value;
-		}
-		return {
-			ok: true,
-			status: statusAnswer.choice as WatchdogStatus,
-			pStatus,
-			probabilities,
-			persistent: persistent.probability,
-			model: `${result.provider}/${result.model}`,
-		};
+function watchdogAnswerOf(result: ClassifierResult, model: string): WatchdogJevResult {
+	const statusAnswer = result.answers?.status;
+	if (statusAnswer?.type !== "choice" || !WATCHDOG_STATUSES.includes(statusAnswer.choice as WatchdogStatus)) {
+		return { ok: false, reason: "malformed" };
 	}
+	const pStatus = (statusAnswer.probabilities as Record<string, unknown> | undefined)?.[statusAnswer.choice];
+	if (!isProbability(pStatus)) return { ok: false, reason: "malformed" };
+	const persistent = result.answers.persistent;
+	if (persistent?.type !== "bool" || !isProbability(persistent.probability)) return { ok: false, reason: "malformed" };
+	const probabilities: Record<string, number> = {};
+	for (const [label, value] of Object.entries(statusAnswer.probabilities ?? {})) {
+		if (isProbability(value)) probabilities[label] = value;
+	}
+	return {
+		ok: true,
+		status: statusAnswer.choice as WatchdogStatus,
+		pStatus,
+		probabilities,
+		persistent: persistent.probability,
+		model,
+	};
 }

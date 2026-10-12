@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { APPROVAL_MODE_ENV, type GuardConfig, type WatchdogConfig } from "../src/config.js";
+import { APPROVAL_MODE_ENV, type GuardConfig, type JevConfig, type WatchdogConfig } from "../src/config.js";
 import { BASH_GUARD_RUNTIME_SYMBOL, type BashGuardRuntime } from "../src/runtime.js";
 import { ALLOW_ENTRY_TYPE, SETTINGS_ENTRY_TYPE } from "../src/state.js";
 import bashGuardExtension from "../extensions/index.js";
@@ -105,7 +105,7 @@ function makeHarness(
 		jevP?: number;
 		branch?: unknown[];
 		branchThrows?: boolean;
-		config?: { guard?: Partial<GuardConfig>; watchdog?: Partial<WatchdogConfig> };
+		config?: { guard?: Partial<GuardConfig>; watchdog?: Partial<WatchdogConfig>; jev?: Partial<JevConfig> };
 	} = {},
 ): Harness {
 	let cwd = "/proj";
@@ -223,8 +223,45 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.unstubAllEnvs();
+	vi.unstubAllGlobals();
 	delete globalSymbols()[BASH_GUARD_RUNTIME_SYMBOL];
 	for (const path of tempProjects.splice(0)) rmSync(path, { recursive: true, force: true });
+});
+
+describe("Jev endpoint extension wiring", () => {
+	it("loads endpoint config at session_start and reports a credential-free model label", async () => {
+		const key = "extension-private-key";
+		vi.stubEnv("BG_EXTENSION_JEV_KEY", key);
+		const fetch = vi.fn(async () => new Response(JSON.stringify({ answers: { irreversible: { type: "noul", noul: 0.1 } } }), { status: 200 }));
+		vi.stubGlobal("fetch", fetch);
+		const h = makeHarness({
+			jevP: 0.9,
+			config: { jev: { endpoint: { baseUrl: "https://private-endpoint.example/v1", apiKey: "$BG_EXTENSION_JEV_KEY", models: [`custom-${key}`] } } },
+		});
+		await h.sessionStart();
+		await expect(h.toolCall("rm -rf node_modules")).resolves.toBeUndefined();
+		expect(fetch).toHaveBeenCalledOnce();
+		expect(h.registry!.classify).not.toHaveBeenCalled();
+		await h.command("");
+		const status = h.ui.notify.mock.calls.at(-1)![0] as string;
+		expect(status).toContain("jev: on - endpoint/custom-[REDACTED]");
+		expect(status).not.toContain(key);
+		expect(status).not.toContain("private-endpoint.example");
+		await h.shutdown();
+	});
+
+	it("falls back to registry authentication after the configured endpoint fails", async () => {
+		const fetch = vi.fn(async () => new Response(JSON.stringify({ error: { message: "upstream error" } }), { status: 503 }));
+		vi.stubGlobal("fetch", fetch);
+		const h = makeHarness({ jevP: 0.1, config: { jev: { endpoint: { baseUrl: "https://endpoint.example/v1", apiKey: "private-key" } } } });
+		await h.sessionStart();
+		await expect(h.toolCall("rm -rf node_modules")).resolves.toBeUndefined();
+		expect(fetch).toHaveBeenCalledTimes(2);
+		expect(h.registry!.classify).toHaveBeenCalledOnce();
+		await h.command("");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("jev: on - typesafe/jev-latest");
+		await h.shutdown();
+	});
 });
 
 describe("runtime capability marker lifecycle", () => {

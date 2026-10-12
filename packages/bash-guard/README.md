@@ -107,7 +107,11 @@ Jev is reached through Pi's built-in classifier API, so your existing Pi credent
 | `vercel-ai-gateway` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` |
 | `cloudflare-workers-ai` | `typesafe/jev` | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` |
 
-Unpinned, the first available model in this order is used. It is re-resolved lazily, so `/login` takes effect without a restart. Pin one with `jev.model` (`"provider/modelId"`); a pinned model that is unavailable leaves the guard rules-only rather than falling back to another provider.
+Unpinned, models are tried in this order. The `typesafe` System One provider accepts both wire model names: `jev-latest`, then `jev-1.13.0`. This also works when its URL and credentials are overridden in Pi's `models.json`, for example to use RelayRouter. The alternate name is derived from the built-in classifier; it does not need a custom chat-model entry.
+
+Timeouts, provider errors, and malformed answers trigger runtime failover to the next available candidate, including OpenRouter. Each candidate is tried at most once per decision, with its own `jev.timeoutMs` budget, so total latency can exceed that budget. Candidates are resolved lazily: an unused fallback provider's authentication cannot delay the preferred endpoint. Availability probes are also cancellation-aware and bounded by `jev.timeoutMs`. The next decision starts with the preferred provider again. A valid answer ends the search regardless of its score; cancellation stops it immediately. If every attempt fails, the guard escalates and the watchdog resets its agreement count. Usage reported by all attempts is accumulated.
+
+Resolution remains lazy, so `/login` takes effect without a restart. Pin one with `jev.model` (`"provider/modelId"`); pinned models retain the existing behavior: no cross-provider failover, and an unavailable pinned model leaves the guard rules-only.
 
 **Privacy:** classifier input goes to whichever provider serves the model. The guard sends the command, matched rule reasons, cwd, git branch, and dirty flag. The watchdog sends the command, cwd, runtime, seconds since output changed, and an output tail. Text is redacted for common secret shapes (API keys, tokens, passwords, Bearer, AWS, JWT, private keys, URL credentials) on a best-effort basis. No conversation content or files are sent.
 
@@ -176,13 +180,36 @@ Set defaults for new sessions in `~/.pi/agent/bash-guard.json`, overridden by `<
     "agreeChecks": 2
   },
   "jev": {
-    "timeoutMs": 3000,
+    "timeoutMs": 6000,
     "model": "openrouter/~typesafe/jev-latest"
   }
 }
 ```
 
-`extraRiskyPatterns` and `allowPatterns` are regexes matched against the full command; allow wins over built-in rules, and invalid regexes are reported and skipped. `guard.approvalMode` is `"ask"` (confirm with the user) or `"deny"` (block all escalations); session selections override this default, the `PI_BASH_GUARD_APPROVAL_MODE` launch override wins over both, and a valid `deny` value also pins the guard on (see Approval modes). `jev.timeoutMs` applies per call. Leave `jev.model` unset for auto-detection.
+`extraRiskyPatterns` and `allowPatterns` are regexes matched against the full command; allow wins over built-in rules, and invalid regexes are reported and skipped. `guard.approvalMode` is `"ask"` (confirm with the user) or `"deny"` (block all escalations); session selections override this default, the `PI_BASH_GUARD_APPROVAL_MODE` launch override wins over both, and a valid `deny` value also pins the guard on (see Approval modes). `jev.timeoutMs` defaults to 6000ms and applies per attempt. Leave `jev.model` unset for auto-detection and failover.
+
+### Custom Jev endpoint
+
+**Added in 0.4.0:** alternate Jev model names, automatic runtime failover, and custom System One endpoints. Existing `jev.model` pins remain single-provider.
+
+To use RelayRouter or another **System One-compatible** provider directly, configure `jev.endpoint` in `bash-guard.json` instead of `jev.model`:
+
+```json
+{
+  "jev": {
+    "timeoutMs": 6000,
+    "endpoint": {
+      "baseUrl": "https://api.relayrouter.ai/v1",
+      "apiKey": "$RELAYROUTER_JEV_API_KEY",
+      "models": ["jev-1.13.0", "jev-latest"]
+    }
+  }
+}
+```
+
+The client posts to `<baseUrl>/systemone`. A generic OpenAI chat endpoint is not sufficient. `models` is an ordered list of wire model IDs; omitted, it defaults to `["jev-latest", "jev-1.13.0"]`. Endpoint candidates run first, then the available Pi-registry candidates above, including OpenRouter. If the endpoint credential is missing, registry candidates can still run.
+
+`apiKey` accepts a literal key, `$NAME`, or `${NAME}`. Prefer an environment reference: the variable must exist in the Pi process. Shell commands are not supported. Do not put credentials in the URL. `jev.endpoint` and `jev.model` are mutually exclusive. Endpoint calls reuse Pi's System One SDK, but authenticate with this key rather than `/login`; no change to `models.json` is required. Existing registry-only configurations continue to work. Reload after changing `bash-guard.json`.
 
 ## Limits
 

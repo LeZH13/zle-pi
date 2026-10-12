@@ -20,6 +20,7 @@ describe("config defaults", () => {
 		const { config, files } = loadConfig({ agentDir: "/agent", projectDir: "/proj", readFile: () => undefined, onError });
 		expect(config).toEqual(DEFAULT_CONFIG);
 		expect(config.guard.approvalMode).toBe("ask");
+		expect(config.jev.timeoutMs).toBe(6000);
 		expect(files).toEqual([]);
 		expect(onError).not.toHaveBeenCalled();
 	});
@@ -114,6 +115,121 @@ describe("config merge and validation", () => {
 		expect(files).toEqual([userPath]);
 		expect(config.jev.model).toBe("typesafe/jev-beta");
 		expect(config.guard.allowBelow).toBe(DEFAULT_CONFIG.guard.allowBelow);
+	});
+});
+
+describe("Jev endpoint configuration", () => {
+	const endpoint = { baseUrl: "https://api.relayrouter.ai/v1", apiKey: "$RELAYROUTER_JEV_API_KEY" };
+
+	function load(jev: unknown) {
+		const onError = vi.fn();
+		return {
+			...loadConfig({
+				agentDir: "/agent", projectDir: "/proj",
+				readFile: file({ [userConfigPath("/agent")]: JSON.stringify({ jev }) }), onError,
+			}),
+			onError,
+		};
+	}
+
+	it.each(["literal-key", "$RELAYROUTER_JEV_API_KEY", "${RELAYROUTER_JEV_API_KEY}"])("accepts key %s without resolving credentials at config load", (apiKey) => {
+		const { config, onError } = load({ endpoint: { ...endpoint, apiKey } });
+		expect(config.jev.endpoint).toEqual({ ...endpoint, apiKey });
+		expect(config.jev.model).toBeUndefined();
+		expect(onError).not.toHaveBeenCalled();
+	});
+
+	it("accepts a local HTTP base URL and explicit ordered models", () => {
+		const custom = { ...endpoint, baseUrl: "http://127.0.0.1:1234/v1/", models: ["jev-1.13.0", "jev-latest"] };
+		const { config, onError } = load({ timeoutMs: 1200, endpoint: custom });
+		expect(config.jev).toEqual({ timeoutMs: 1200, model: undefined, endpoint: custom });
+		expect(onError).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		null,
+		{},
+		{ ...endpoint, baseUrl: undefined },
+		{ ...endpoint, apiKey: undefined },
+		{ ...endpoint, baseUrl: 12 },
+		{ ...endpoint, baseUrl: "not a URL" },
+		{ ...endpoint, baseUrl: "ftp://example.com/v1" },
+		{ ...endpoint, baseUrl: "https://" },
+		{ ...endpoint, baseUrl: " https://example.com/v1 " },
+		{ ...endpoint, baseUrl: "https://user:private-password@example.com/v1" },
+		{ ...endpoint, baseUrl: "https://private-user@example.com/v1" },
+		{ ...endpoint, apiKey: 12 },
+		{ ...endpoint, apiKey: "" },
+		{ ...endpoint, apiKey: "   " },
+		{ ...endpoint, apiKey: "!echo private-key" },
+		{ ...endpoint, apiKey: "$NAME/suffix" },
+		{ ...endpoint, apiKey: "prefix-${NAME}" },
+		{ ...endpoint, apiKey: "${}" },
+		{ ...endpoint, apiKey: "$1KEY" },
+		{ ...endpoint, apiKey: "$NAME\n" },
+		{ ...endpoint, models: [] },
+		{ ...endpoint, models: "jev-latest" },
+		{ ...endpoint, models: ["jev-latest", 12] },
+		{ ...endpoint, models: [""] },
+		{ ...endpoint, models: ["   "] },
+		{ ...endpoint, models: ["jev-latest\n"] },
+		{ ...endpoint, unexpected: "value" },
+	])("rejects invalid endpoint %# without disclosing its contents", (invalid) => {
+		const { config, files, onError } = load({ endpoint: invalid });
+		expect(config).toEqual(DEFAULT_CONFIG);
+		expect(files).toEqual([]);
+		expect(onError).toHaveBeenCalledWith(expect.stringContaining("ignoring invalid keys"));
+		expect(JSON.stringify(onError.mock.calls)).not.toContain("private-");
+	});
+
+	it("rejects a pin and endpoint in one file", () => {
+		const { config, onError } = load({ model: "typesafe/jev-latest", endpoint });
+		expect(config).toEqual(DEFAULT_CONFIG);
+		expect(onError).toHaveBeenCalled();
+	});
+
+	it.each([true, false])("rejects a pin/endpoint conflict across user and project files (endpoint in user: %s)", (endpointInUser) => {
+		const onError = vi.fn();
+		const userPath = userConfigPath("/agent");
+		const projectPath = projectConfigPath("/proj");
+		const pin = { model: "typesafe/jev-latest" };
+		const { config, files } = loadConfig({
+			agentDir: "/agent", projectDir: "/proj", onError,
+			readFile: file({
+				[userPath]: JSON.stringify({ jev: endpointInUser ? { endpoint } : pin }),
+				[projectPath]: JSON.stringify({ jev: endpointInUser ? pin : { endpoint } }),
+			}),
+		});
+		expect(config).toEqual(DEFAULT_CONFIG);
+		expect(files).toEqual([userPath, projectPath]);
+		expect(onError).toHaveBeenCalledWith("Invalid merged bash-guard config, using defaults");
+	});
+
+	it("replaces a project endpoint as a whole, without inheriting credentials or model IDs", () => {
+		const projectEndpoint = { baseUrl: "https://other.example/v1", apiKey: "other-key" };
+		const { config } = loadConfig({
+			agentDir: "/agent", projectDir: "/proj",
+			readFile: file({
+				[userConfigPath("/agent")]: JSON.stringify({ jev: { timeoutMs: 4500, endpoint: { ...endpoint, models: ["user-model"] } } }),
+				[projectConfigPath("/proj")]: JSON.stringify({ jev: { endpoint: projectEndpoint } }),
+			}),
+		});
+		expect(config.jev.endpoint).toEqual(projectEndpoint);
+		expect(config.jev.timeoutMs).toBe(4500);
+	});
+
+	it.each([199, 250.5, 2_147_483_648, 4_294_967_296])("rejects timeout %s outside the Node timer's integer range", (timeoutMs) => {
+		expect(load({ timeoutMs }).config).toEqual(DEFAULT_CONFIG);
+	});
+
+	it("does not expose API keys through JSON parser error snippets", () => {
+		const onError = vi.fn();
+		loadConfig({
+			agentDir: "/agent", projectDir: "/proj", onError,
+			readFile: file({ [userConfigPath("/agent")]: '{"jev":{"endpoint":{"apiKey":"private-key" BREAK}}}' }),
+		});
+		expect(onError).toHaveBeenCalledWith(expect.stringContaining("Invalid JSON"));
+		expect(JSON.stringify(onError.mock.calls)).not.toContain("private-key");
 	});
 });
 

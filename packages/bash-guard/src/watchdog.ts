@@ -261,14 +261,17 @@ export class Watchdog {
 			if (checks.length > MAX_CHECKS_PER_COMMAND) checks.splice(0, checks.length - MAX_CHECKS_PER_COMMAND);
 		};
 
-		if (!(await this.deps.jev.ensureAvailable())) {
+		const checkAbort = new AbortController();
+		entry.checkAbort = checkAbort;
+		const available = await this.deps.jev.ensureAvailable(checkAbort.signal);
+		if (!entry.active || entry.killed || checkAbort.signal.aborted) return;
+		if (!available) {
 			// No Jev to judge with: stay neutral and forgetful.
 			entry.agreeCount = 0;
 			record("failed: no Jev classifier available");
 			return;
 		}
 		const now = this.deps.now();
-		entry.checkAbort = new AbortController();
 		const changedSinceLastCheck = entry.outputDirty;
 		const state = {
 			value: {
@@ -280,7 +283,7 @@ export class Watchdog {
 				output_tail: tailForReport(entry.tail),
 			},
 		};
-		const answer = await this.deps.jev.watchdogAnswer(state, entry.checkAbort.signal);
+		const answer = await this.deps.jev.watchdogAnswer(state, checkAbort.signal);
 		if (!entry.active || entry.killed) return;
 		entry.outputDirty = false;
 		if (!answer.ok) {

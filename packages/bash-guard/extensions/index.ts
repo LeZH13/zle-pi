@@ -95,6 +95,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let jev: Jev = createJev({
 		getRegistry: () => currentRegistry,
 		modelSpec: DEFAULT_CONFIG.jev.model,
+		endpoint: DEFAULT_CONFIG.jev.endpoint,
 		timeoutMs: DEFAULT_CONFIG.jev.timeoutMs,
 	});
 	let watchdog: Watchdog | undefined;
@@ -418,6 +419,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		jev = createJev({
 			getRegistry: () => currentRegistry,
 			modelSpec: config.jev.model,
+			endpoint: config.jev.endpoint,
 			timeoutMs: config.jev.timeoutMs,
 		});
 		// Resolve the classifier eagerly so the status line and the one-time
