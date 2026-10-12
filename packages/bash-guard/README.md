@@ -10,6 +10,8 @@ pi install npm:@zle13/pi-bash-guard
 pi -e npm:@zle13/pi-bash-guard   # try once
 ```
 
+**0.4.1 fixes extension loading for managed installs on Pi 1.x.** Custom endpoints use Pi's exposed built-in provider API rather than a raw SDK subpath. Configuration and guard behavior are unchanged.
+
 ## Approval modes
 
 `guard.approvalMode` decides what happens to a risky command that is not allowed by rules or Jev:

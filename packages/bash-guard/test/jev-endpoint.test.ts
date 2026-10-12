@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import type { ClassifierApi, ClassifierModel } from "@earendil-works/pi-ai";
-import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { discoverAndLoadExtensions, ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createJev } from "../src/jev.js";
+import { BASH_GUARD_RUNTIME_SYMBOL } from "../src/runtime.js";
 
 interface WireCall {
 	path: string;
@@ -72,6 +75,47 @@ afterEach(async () => {
 	})));
 	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
+
+it("loads a managed package without physical Pi peers and executes its endpoint through the real extension loader", async () => {
+	const directory = mkdtempSync(join(tmpdir(), "bash-guard-managed-"));
+	directories.push(directory);
+	const packageRoot = fileURLToPath(new URL("../", import.meta.url));
+	for (const entry of ["extensions", "src", "package.json"]) {
+		cpSync(join(packageRoot, entry), join(directory, entry), { recursive: true });
+	}
+	// Managed installs contain runtime dependencies, but Pi suppresses peer installation.
+	const require = createRequire(import.meta.url);
+	cpSync(dirname(require.resolve("shell-quote/package.json")), join(directory, "node_modules/shell-quote"), { recursive: true });
+	expect(() => createRequire(join(directory, "package.json")).resolve("@earendil-works/pi-ai")).toThrow();
+	const { baseUrl, calls } = await startEndpoint(() => success());
+	const probePath = join(directory, "extensions/endpoint-probe.ts");
+	writeFileSync(probePath, `
+		import { createJev } from "../src/jev.js";
+		export default async function (pi) {
+			const jev = createJev({ getRegistry: () => undefined, timeoutMs: 3000,
+				endpoint: { baseUrl: ${JSON.stringify(baseUrl)}, apiKey: "managed-endpoint-key" } });
+			const answer = await jev.guardAnswer({});
+			pi.registerCommand("endpoint-probe", { description: JSON.stringify(answer), handler: async () => {} });
+		}
+	`);
+	const globals = globalThis as unknown as Record<symbol, unknown>;
+	const previousMarker = globals[BASH_GUARD_RUNTIME_SYMBOL];
+	try {
+		const loaded = await discoverAndLoadExtensions([
+			join(directory, "extensions/index.ts"), probePath,
+		], directory, join(directory, "agent"));
+		expect(loaded.errors).toEqual([]);
+		expect(loaded.extensions).toHaveLength(2);
+		expect(loaded.extensions[0].commands.has("bash-guard")).toBe(true);
+		expect(JSON.parse(loaded.extensions[1].commands.get("endpoint-probe")!.description!))
+			.toEqual({ ok: true, p: 0.9, model: "endpoint/jev-latest" });
+		expect(calls).toHaveLength(1);
+		expect(calls[0].headers.authorization).toBe("Bearer managed-endpoint-key");
+	} finally {
+		if (previousMarker === undefined) delete globals[BASH_GUARD_RUNTIME_SYMBOL];
+		else globals[BASH_GUARD_RUNTIME_SYMBOL] = previousMarker;
+	}
+}, 15_000);
 
 describe("explicit Jev System One endpoint", () => {
 	it("executes the endpoint without probing unused stalled registry auth", async () => {

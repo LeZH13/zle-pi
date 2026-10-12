@@ -5,8 +5,8 @@
  * order, on errors, timeouts, or malformed answers. A valid verdict (at any
  * probability) ends the search. Model pins never use aliases or failover.
  */
-import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierQuestion, ClassifierResult } from "@earendil-works/pi-ai";
-import { classify } from "@earendil-works/pi-ai/api/typesafe-system-one";
+import type { ClassifierApi, ClassifierContext, ClassifierModel, ClassifierQuestion, ClassifierResult, Provider } from "@earendil-works/pi-ai";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { JevEndpointConfig } from "./config.js";
 import { redactSecrets } from "./redact.js";
@@ -167,6 +167,7 @@ async function untilAbort<T>(pending: Promise<T>, signal: AbortSignal, failure: 
 
 export function createJev(deps: JevDeps): Jev {
 	let resolved: Candidate | undefined;
+	let endpointProvider: Provider | undefined;
 	let usageTotals: JevUsage = { input: 0, output: 0, totalTokens: 0, cost: 0 };
 	let lastFailure: JevFailureReason | undefined;
 	// Retain observed endpoint keys so even a late response after key rotation is safe.
@@ -306,9 +307,16 @@ export function createJev(deps: JevDeps): Jev {
 			try {
 				if (callSignal.aborted) return interruption();
 				const options = { signal: callSignal, timeoutMs: deps.timeoutMs, maxRetries: 0 };
-				const result = candidate.source === "endpoint"
-					? await classify(candidate.model, context, { ...options, apiKey: candidate.apiKey })
-					: await candidate.registry.classify(candidate.model, context, options);
+				let result: ClassifierResult;
+				if (candidate.source === "endpoint") {
+					// Pi exposes providers/all to managed extensions, not raw API subpaths.
+					// Call the native provider directly so registry auth/overrides stay isolated.
+					endpointProvider ??= builtinProviders().find((provider) => provider.id === "typesafe");
+					if (!endpointProvider?.classify) throw new Error("Pi's TypeSafe classifier is unavailable");
+					result = await endpointProvider.classify(candidate.model, context, { ...options, apiKey: candidate.apiKey });
+				} else {
+					result = await candidate.registry.classify(candidate.model, context, options);
+				}
 				// Include billed failures, malformed answers, and late cancelled results.
 				addUsage(result);
 				if (callSignal.aborted) return interruption();
