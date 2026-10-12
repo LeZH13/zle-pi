@@ -256,15 +256,16 @@ describe("editorExtension lifecycle", () => {
 	type Handler = (event: never, ctx?: never) => void;
 	function setupHarness() {
 		const handlers = new Map<string, Handler>();
-		const pi = { on: vi.fn((event: string, handler: Handler) => {
+		const pi = { registerCommand: vi.fn(), on: vi.fn((event: string, handler: Handler) => {
 			handlers.set(event, handler);
 			return () => handlers.delete(event);
 		}) };
 		editorExtension(pi as never);
 		return { handlers, pi };
 	}
-	it("registers lifecycle handlers", () => {
+	it("registers lifecycle handlers and the copy command", () => {
 		const { pi } = setupHarness();
+		expect(pi.registerCommand).toHaveBeenCalledWith("copy-command", expect.objectContaining({ handler: expect.any(Function) }));
 		for (const name of ["session_start", "session_info_changed", "session_shutdown"])
 			expect(pi.on).toHaveBeenCalledWith(name, expect.any(Function));
 	});

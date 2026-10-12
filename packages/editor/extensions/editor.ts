@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, CustomEditor } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CommandCopyMenu } from "../lib/command-copy.js";
+import { collectShellCommands, type ShellCommand } from "../lib/shell-commands.js";
 
 export type ModalMode = "normal" | "insert";
 
@@ -198,6 +200,18 @@ function wordBoundary(
 }
 
 export class NamedSessionEditor extends CustomEditor {
+	/** Build an inline menu without changing editor focus. */
+	onCopyCommand: (() => CommandCopyMenu) | undefined;
+	onCopyStatus: ((message: string, type: "info" | "error") => void) | undefined;
+	private copyPrefixPending = false;
+	private copyPrefixEditing = false;
+	private copyPasteActive = false;
+	private copyMode = false;
+	private copyMenu: CommandCopyMenu | undefined;
+	private copyMenuVisible = false;
+	private copyRevision = 0;
+	private copying = false;
+	private disposed = false;
 	private mode: ModalMode = "insert";
 	/** Leader of a two-key combination awaiting its second key (e.g. `d` in `dd`). */
 	private pendingLeader: string | undefined;
@@ -217,10 +231,10 @@ export class NamedSessionEditor extends CustomEditor {
 	constructor(
 		tui: ConstructorParameters<typeof CustomEditor>[0],
 		theme: ConstructorParameters<typeof CustomEditor>[1],
-		keybindings: ConstructorParameters<typeof CustomEditor>[2],
+		private readonly copyKeybindings: ConstructorParameters<typeof CustomEditor>[2],
 		private getSessionName: () => string | undefined,
 	) {
-		super(tui, theme, keybindings, { embedWorkingStatus: true });
+		super(tui, theme, copyKeybindings, { embedWorkingStatus: true });
 		const internals = this as unknown as EditorInternals;
 		const base = internals.pushUndoSnapshot.bind(this);
 		this.basePushUndo = base;
@@ -240,6 +254,10 @@ export class NamedSessionEditor extends CustomEditor {
 	private setMode(mode: ModalMode): void {
 		if (this.mode === mode) return;
 		this.mode = mode;
+		if (mode === "normal") {
+			this.closeCopyMode();
+			this.copyPrefixEditing = false;
+		}
 		this.syncHardwareCursor(true);
 	}
 
@@ -255,6 +273,8 @@ export class NamedSessionEditor extends CustomEditor {
 	}
 
 	dispose(): void {
+		this.disposed = true;
+		this.closeCopyMode();
 		this.lastShapeWritten = undefined;
 		if (this.tui?.terminal?.write) {
 			this.tui.terminal.write(CURSOR_RESET_SEQUENCE);
@@ -424,7 +444,96 @@ export class NamedSessionEditor extends CustomEditor {
 		internals.onChange?.(this.getText());
 	}
 
+	private closeCopyMode(): void {
+		this.copyMode = false;
+		this.copyMenu = undefined;
+		this.copyMenuVisible = false;
+		this.copyPrefixPending = false;
+		this.copyRevision++;
+	}
+
+	private activateCopyMode(): void {
+		this.copyMode = true;
+		this.copyPrefixEditing = true;
+		(this as unknown as EditorInternals).cancelAutocomplete();
+		try {
+			this.copyMenu = this.onCopyCommand!();
+			this.copyMenu.setQuery(this.getExpandedText().slice(2));
+			this.copyMenuVisible = true;
+		} catch (error) {
+			this.onCopyStatus?.(`Command copy failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
+		this.tui?.requestRender?.();
+	}
+
+	/** Slash-command entry point; callers must leave an existing draft untouched. */
+	startCommandCopy(): void {
+		if (!this.onCopyCommand || this.getText() !== "") return;
+		this.setMode("insert");
+		this.setText("$$");
+		this.activateCopyMode();
+	}
+
+	private async copySelected(command: ShellCommand): Promise<void> {
+		if (this.copying) return;
+		this.copying = true;
+		const revision = this.copyRevision;
+		try {
+			await copyToClipboard(command.text);
+			if (this.disposed || revision !== this.copyRevision) return;
+			this.setText("");
+			this.onCopyStatus?.("Command sent to clipboard (terminal clipboard delivery may be best effort)", "info");
+		} catch (error) {
+			if (!this.disposed && revision === this.copyRevision) {
+				this.onCopyStatus?.(`Command copy failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+		} finally {
+			this.copying = false;
+		}
+	}
+
+	override setText(text: string): void {
+		this.closeCopyMode();
+		this.copyPrefixEditing = false;
+		super.setText(text);
+		this.tui?.requestRender?.();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.copyMenu?.invalidate();
+	}
+
 	override handleInput(data: string): void {
+		const pasteChunk = this.copyPasteActive || data.includes("\x1b[200~");
+		if (data.includes("\x1b[200~")) this.copyPasteActive = true;
+		if (data.includes("\x1b[201~")) this.copyPasteActive = false;
+		const dollar = !pasteChunk && matchesKey(data, "$");
+		const startCopy = !!this.onCopyCommand && this.mode === "insert" && dollar
+			&& ((this.copyPrefixPending && this.getText() === "$" && this.cursorOffset() === 1) || this.copyPrefixEditing);
+		this.copyPrefixPending = false;
+		if (this.copyMode && this.mode === "insert" && !pasteChunk) {
+			const cancel = matchesKey(data, "escape") || this.copyKeybindings.matches(data, "tui.select.cancel");
+			if (cancel && this.copyMenuVisible) {
+				this.copyMenuVisible = false;
+				this.copyRevision++;
+				this.tui?.requestRender?.();
+				return;
+			}
+			if (this.copyKeybindings.matches(data, "tui.select.confirm") || this.copyKeybindings.matches(data, "tui.input.submit")) {
+				if (!this.copyMenuVisible) {
+					this.copyMenuVisible = true;
+					this.tui?.requestRender?.();
+				} else if (this.copyMenu?.selected) void this.copySelected(this.copyMenu.selected);
+				return; // A copy query is never a prompt submission, even with no matches.
+			}
+			if (this.copyKeybindings.matches(data, "app.message.followUp") || matchesKey(data, "tab")) return;
+			if (this.copyMenuVisible && this.copyMenu?.handleInput(data)) return;
+			if (cancel) {
+				this.closeCopyMode();
+				this.copyPrefixEditing = false;
+			}
+		}
 		if (this.mode === "normal") {
 			if (this.ignoringPaste) {
 				if (data.includes("\x1b[201~")) this.ignoringPaste = false;
@@ -457,9 +566,32 @@ export class NamedSessionEditor extends CustomEditor {
 			return;
 		}
 
-		// Insert mode: pass everything through
+		// Edit the prefix/query in place. The menu never owns terminal focus.
 		if (this.mode === "insert") {
+			const armCopy = !!this.onCopyCommand && dollar && this.getText() === "";
+			const before = this.getExpandedText();
+			if (this.copyMode) (this as unknown as EditorInternals).cancelAutocomplete();
 			super.handleInput(data);
+			const after = this.getExpandedText();
+			if (this.copyMode) {
+				if (!after.startsWith("$$")) {
+					this.closeCopyMode();
+					this.copyPrefixEditing = after.startsWith("$");
+				} else {
+					if (before !== after) {
+						this.copyRevision++;
+						this.copyMenu?.setQuery(after.slice(2));
+						this.copyMenuVisible = true;
+					}
+					(this as unknown as EditorInternals).cancelAutocomplete();
+				}
+			} else if (startCopy && after.startsWith("$$")) {
+				this.activateCopyMode();
+			} else {
+				this.copyPrefixPending = armCopy && after === "$";
+				if (!after.startsWith("$") || pasteChunk) this.copyPrefixEditing = false;
+			}
+			this.tui?.requestRender?.();
 			return;
 		}
 
@@ -552,6 +684,10 @@ export class NamedSessionEditor extends CustomEditor {
 				this.borderColor,
 			);
 		}
+		if (this.copyMenuVisible && this.copyMenu) {
+			const maxHeight = Math.max(0, this.tui.terminal.rows - lines.length - 4);
+			return [...lines, ...this.copyMenu.render(width, maxHeight)];
+		}
 		return lines;
 	}
 
@@ -569,6 +705,20 @@ export default function editorExtension(pi: ExtensionAPI): void {
 	let requestRender: (() => void) | undefined;
 	let ourFactory: EditorFactory | undefined;
 	let activeEditor: NamedSessionEditor | undefined;
+	pi.registerCommand("copy-command", {
+		description: "Open the inline shell-code-block copy menu in an empty editor",
+		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui" || !ctx.hasUI || !activeEditor || ctx.ui.getEditorComponent() !== ourFactory) {
+				ctx.ui.notify("Inline command copying requires the pi-editor terminal editor", "error");
+				return;
+			}
+			if (activeEditor.getText() !== "") {
+				ctx.ui.notify("Clear the editor before opening command-copy mode", "error");
+				return;
+			}
+			activeEditor.startCommandCopy();
+		},
+	});
 
 	const onProcessExit = () => {
 		try {
@@ -591,6 +741,12 @@ export default function editorExtension(pi: ExtensionAPI): void {
 			const editor = new NamedSessionEditor(tui, theme, keybindings, () =>
 				sessionCtx.sessionManager.getSessionName(),
 			);
+			editor.onCopyCommand = () => new CommandCopyMenu(
+				collectShellCommands(sessionCtx.sessionManager.getBranch()), tui, () => sessionCtx.ui.theme, keybindings,
+			);
+			editor.onCopyStatus = (message, type) => {
+				if (activeEditor === editor) sessionCtx.ui.notify(message, type);
+			};
 			activeEditor = editor;
 			return editor;
 		};

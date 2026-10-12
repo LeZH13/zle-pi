@@ -1,7 +1,7 @@
 {
   "name": "@zle13/pi-editor",
-  "version": "0.3.1",
-  "description": "Show the session name and provide a focused Vim-style modal prompt editor for Pi.",
+  "version": "0.4.0",
+  "description": "A Vim-style Pi prompt editor with a session-name badge and a shell-command clipboard picker.",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -18,10 +18,14 @@
   },
   "files": [
     "extensions",
+    "lib",
     "README.md"
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "marked": "^18.0.11"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

@@ -1,6 +1,6 @@
 # @zle13/pi-editor
 
-Show the explicit session name right-flush on the Pi input editor top border, and vim-style modal editing with a mode indicator on the bottom border. Unnamed sessions render the native border with no badge.
+A Vim-style prompt editor with a session-name badge and a shell-command clipboard picker. Unnamed sessions render the native top border with no badge.
 
 ## Installation
 
@@ -22,7 +22,7 @@ Then launch Pi in TUI mode or run `/reload`.
 - **Unnamed session** (undefined, empty, or whitespace-only): native Pi border untouched.
 - **Working / scroll states**: the badge composes over `super.renderTopBorder()`, so the working spinner (`── ◐ Working…`) and scroll indicator (`↑ N more`) keep their native positions on the left/center.
 - **Narrow terminals / long names**: names truncate with `…`; if fewer than 8 columns remain for the badge, the native border wins.
-- **Conflicts**: if another custom editor is already active (e.g. Zentui), this extension defers and notifies once per session.
+- **Conflicts**: if another custom editor is already active (e.g. Zentui), this extension defers and notifies once per session. Both the `$$` trigger and `/copy-command` require this extension to own the editor.
 
 ```text
 named idle:    ────────────────────── my-session ──
@@ -31,9 +31,33 @@ named scroll:  ─────── ↑ 3 more ──────── my-sess
 unnamed:       ────────────────────────── (native)
 ```
 
+## Copy shell commands
+
+Type **`$$` into an empty editor in INSERT mode** to show an inline command-copy menu—no Enter needed. **The editor stays visible and retains focus, with `$$` still in it.** Delete either leading `$` and the menu disappears; restore the prefix to show it again. Text after `$$` filters command text case-insensitively (for example, **`$$git`**). Ordinary Left/Right and deletion keys keep editing the prefix/query.
+
+The first `$` remains ordinary input until the second consecutive `$`; `$HOME`, dollars inside an existing prompt, NORMAL-mode Vim `$`, an initial bracketed paste, and dialog input do not activate copy mode. You can paste filter text after deliberately activating `$$`. To enter a literal initial `$$`, paste it instead of typing it.
+
+**`/copy-command`** enters the same inline mode by inserting `$$` into an empty editor. It requires this extension to own the main editor and refuses to overwrite an existing draft.
+
+The menu scans the **last ten assistant messages on the current session branch**, newest first, and includes **only closed code blocks labelled `bash`, `sh`, `shell`, or `zsh`** (case-insensitive; extra fence metadata is allowed). **Bash tool calls are not candidates.** Unlabelled fences, `text`, `console`, other programming languages, inline code, thinking, tool results, and error/aborted assistant messages are excluded. Tool-call-only assistant messages still count toward the ten-message window. This is explicit shell-language filtering, not semantic validation of command safety. Ask the model to use labelled `bash` fences for commands you want to copy.
+
+- **Up/Down**: choose a snippet; **PageUp/PageDown**: move by a list page. These respect your `tui.select.*` keybindings.
+- **Enter**: copy the selected snippet and clear `$$` plus the query after success. An empty/no-match menu never submits the query as a prompt; neither do queued follow-up keys.
+- **Escape/Ctrl+C**: hide the menu, leaving the prefix/query editable in INSERT mode. Editing shows it again; Enter while hidden reopens the preview without copying unseen content. A second Escape enters NORMAL mode; a second Ctrl+C retains Pi's clear action.
+- **Ctrl+Left/Ctrl+Right**: scroll a long preview backward/forward by a page. Plain Left/Right remain editor cursor movement.
+- **R0** marks the newest assistant message, **R1** the previous one, and so on. The preview shows its language and line count.
+
+Even a single match shows a preview before copying. Clipboard failures leave the prefix/query available for retry. Edits made during a pending clipboard write are never erased by its later completion. Multiline snippets stay intact: no splitting pipelines, continuations, loops, or heredocs. Fence markers and Markdown structural indentation are removed by the Markdown parser; command indentation is preserved and line endings are normalized to LF. Shell prompt `$` markers are **not** stripped. Preview-only escaping makes terminal control characters visible without changing copied text. Nothing is executed or sent to the model. No matches or cancellation leave the clipboard unchanged.
+
+Copying uses Pi's public `copyToClipboard()` utility. Native clipboard failures are reported; remote/headless terminal clipboard delivery via OSC 52 may be best effort and depends on terminal/multiplexer support. This is a terminal-UI-only feature, not an RPC/print-mode clipboard tool.
+
+### Unreleased 0.4.0 change
+
+An initial manually typed `$$` is now reserved for editable command-copy mode in INSERT mode. The menu stays attached to the editor rather than replacing it, and only shell code blocks are eligible—not Bash tool calls. Paste literal `$$` when needed. Existing NORMAL-mode `$` motions and Pi's `!`/`!!` Bash input are unchanged.
+
 ## Modal editing
 
-The main prompt editor starts in **INSERT** mode. Escape enters **NORMAL** mode (and cancels an open completion first). Escape cancels a pending normal-mode command; otherwise, in normal mode it retains Pi's interrupt action. Insert mode keeps Pi's normal typing, submission (`enter`), and newline (`ctrl+j`). Unowned controls such as `ctrl+c` and `ctrl+d` still go to Pi.
+The main prompt editor starts in **INSERT** mode. Escape enters **NORMAL** mode (and dismisses an open copy menu or completion first). Escape cancels a pending normal-mode command; otherwise, in normal mode it retains Pi's interrupt action. Insert mode keeps Pi's normal typing, submission (`enter`), and newline (`ctrl+j`). Unowned controls such as `ctrl+c` and `ctrl+d` still go to Pi.
 
 This is a deliberately small, editor-local Vim subset, not a complete Vim implementation. Supported motions operate on logical prompt lines; `w`/`b`/`e` distinguish keyword runs from punctuation and whitespace. Counts repeat motions, `x`, `s`, `dw`, `dd`, `cw`, `cc`, and undo/redo (for example `3w`, `2dd`, `3u`). Counts on `i/a/I/A`, `o/O`, and line-end edit actions are ignored.
 
