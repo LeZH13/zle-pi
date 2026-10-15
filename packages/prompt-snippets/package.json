@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-prompt-snippets",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Mix-and-match prompt snippets that prepend or append rules to messages in Pi",
   "type": "module",
   "keywords": [

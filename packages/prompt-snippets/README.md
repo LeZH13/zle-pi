@@ -30,8 +30,9 @@ Then restart Pi or run `/reload` in your active session.
   - `↑` / `↓` (or custom selection keybindings like `Ctrl+P` / `Ctrl+N`) to navigate items.
   - `Space` to toggle snippet active / inactive.
   - `Tab` to preview the highlighted snippet (shows name, placement, order, source origin, filename, and prompt body). Press `Tab` or `Esc` (or `Ctrl+G` / `Ctrl+C`) to return to the list with cursor position preserved.
+  - `Ctrl+E` to manage snippets: create, edit, duplicate, delete your files, hide bundled snippets, or restore hiding files. Sources (`bundled`, `global`, `project`) appear beside each snippet.
   - `Enter` to apply your selection.
-  - `Esc` to cancel and discard changes.
+  - `Esc` to cancel and discard **toggle changes only**. Explicitly saved snippet edits remain saved.
 - **Keybinding Integration:** Respects custom `tui.select.*` actions from `~/.pi/agent/keybindings.json` (such as `tui.select.up`, `tui.select.down`, `tui.select.pageUp`, `tui.select.pageDown`, `tui.select.confirm`, and `tui.select.cancel`).
 - **Active Snippet Indicator:** Active snippets appear as a widget above the editor:
   - `↑ prepend: ...` (accent color) — inserted before your message.
@@ -70,6 +71,18 @@ Files are re-scanned whenever the menu opens or a message is sent, so edits take
 ---
 
 ## Customizing, Overriding & Disabling Snippets
+
+### Manage without leaving Pi
+
+Press **Alt+S → Ctrl+E**. Management acts on the highlighted snippet; **New snippet** and **Restore hidden snippet** are available even when the list is empty.
+
+- **New / Duplicate:** choose Global or This project (trusted projects only). The last chosen location is remembered for this extension runtime. Set a unique `.md` filename; existing files are never silently overwritten.
+- **Edit:** opens a details screen. Select name, description, placement, order, or prompt body to edit that field. Each field shows its heading followed by a separate, dimmed **Tip:** line explaining what to enter (including placement and prompt body). **Order** is a whole number: lower values appear first within the prepend or append group (10 before 20; ties sort by name), not a model instruction priority. Existing text fields are prefilled; new snippets start with an empty, required name. The body uses Pi's multiline editor. Returning from a field only updates the draft; choose **Save snippet** to write it, or **Discard changes** to leave the file untouched.
+- **Bundled edits:** choose a location for an override with the same filename. Bundled files are never modified.
+- **Delete:** confirms the exact user-file path and warns about lower-priority versions becoming visible. Deleting an override is not the same as hiding its bundled/global version.
+- **Hide:** bundled snippets can be hidden globally or for this project. **Restore hidden snippet** removes a confirmed bodyless hiding file to reveal the lower-priority version. Snippets disabled in `prompt-snippets.json`, or disabled files containing a prompt body, remain managed manually.
+
+Saving or deleting returns to the toggle list with pending selections and cursor position preserved where possible. Changes take effect immediately, even if you later cancel the toggle menu. Files changed externally while a draft is open are not overwritten; discard and reopen the draft to refresh. Symlinked snippet files/directories are read-only to management; edit those manually.
 
 ### 1. Add Your Own Snippets
 
