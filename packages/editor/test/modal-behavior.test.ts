@@ -7,6 +7,8 @@ function makeEditor(): NamedSessionEditor {
 		{ borderColor: (text: string) => text, selectList: {}, text: (text: string) => text } as never,
 		{ matches: () => false } as never,
 		() => "my-session",
+		() => ({} as never),
+		() => true,
 	);
 }
 const cursor = (editor: NamedSessionEditor) =>

@@ -33,7 +33,7 @@ const tick = async () => { await Promise.resolve(); await Promise.resolve(); };
 
 function setup(commands = [command("npm test"), command("git status", 1)]) {
 	const tui = makeTui();
-	const editor = new NamedSessionEditor(tui as never, editorTheme, keybindings as never, () => undefined);
+	const editor = new NamedSessionEditor(tui as never, editorTheme, keybindings as never, () => undefined, () => ({} as never), () => true);
 	const createMenu = vi.fn(() => new CommandCopyMenu(commands, tui as never, () => theme as never, keybindings as never));
 	const status = vi.fn();
 	const submit = vi.fn();

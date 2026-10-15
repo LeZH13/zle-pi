@@ -26,6 +26,8 @@ function setup(name: string | undefined = "my-session") {
 		{ borderColor: identity, selectList: {} as never },
 		{ matches: () => false } as never,
 		() => name,
+		() => ({} as never),
+		() => true,
 	);
 }
 
@@ -139,6 +141,8 @@ describe("cursor shape and bottom border rendering", () => {
 			{ borderColor: identity, selectList: {} as never },
 			{ matches: () => false } as never,
 			() => "my-session",
+			() => ({} as never),
+			() => true,
 		);
 
 		expect(setShowHardwareCursor).toHaveBeenCalledWith(true);
@@ -160,17 +164,17 @@ describe("cursor shape and bottom border rendering", () => {
 
 	it("strips software cursor inverse only in insert mode during render", () => {
 		const cursorLine = `hello ${CURSOR_MARKER}\x1b[7mw\x1b[0morld`;
-		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [cursorLine, native(30)]);
+		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [native(30), cursorLine, native(30)]);
 		try {
 			const editor = setup();
 			// Insert mode: software cursor inverse is stripped
 			const insertLines = editor.render(30);
-			expect(insertLines[0]).toBe(`hello ${CURSOR_MARKER}world`);
+			expect(insertLines[1]).toBe(`hello ${CURSOR_MARKER}world`);
 
 			// Normal mode: software cursor inverse is retained
 			editor.handleInput("\x1b");
 			const normalLines = editor.render(30);
-			expect(normalLines[0]).toBe(cursorLine);
+			expect(normalLines[1]).toBe(cursorLine);
 		} finally {
 			renderSpy.mockRestore();
 		}
@@ -194,6 +198,8 @@ describe("cursor shape and bottom border rendering", () => {
 			{ borderColor: identity, selectList: {} as never },
 			{ matches: () => false } as never,
 			() => "my-session",
+			() => ({} as never),
+			() => true,
 		);
 
 		expect(setShowHardwareCursor).toHaveBeenCalledWith(true);
@@ -206,14 +212,14 @@ describe("cursor shape and bottom border rendering", () => {
 		hardwareCursor = false;
 
 		const cursorLine = `hello ${CURSOR_MARKER}\x1b[7mw\x1b[0morld`;
-		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [cursorLine, native(30)]);
+		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [native(30), cursorLine, native(30)]);
 		try {
 			// First render after reload: detects false, re-enables hardware cursor and forces beam shape
 			const lines = editor.render(30);
 			expect(setShowHardwareCursor).toHaveBeenCalledWith(true);
 			expect(terminalWrite).toHaveBeenCalledWith(CURSOR_SHAPE_BEAM);
 			// Inverse is stripped because hardware cursor is restored
-			expect(lines[0]).toBe(`hello ${CURSOR_MARKER}world`);
+			expect(lines[1]).toBe(`hello ${CURSOR_MARKER}world`);
 
 			// Subsequent render with hardware cursor still active: no redundant setter or escape sequence
 			setShowHardwareCursor.mockClear();
@@ -238,14 +244,16 @@ describe("cursor shape and bottom border rendering", () => {
 			{ borderColor: identity, selectList: {} as never },
 			{ matches: () => false } as never,
 			() => "my-session",
+			() => ({} as never),
+			() => true,
 		);
 
 		const cursorLine = `hello ${CURSOR_MARKER}\x1b[7mw\x1b[0morld`;
-		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [cursorLine, native(30)]);
+		const renderSpy = vi.spyOn(CustomEditor.prototype, "render").mockImplementation(() => [native(30), cursorLine, native(30)]);
 		try {
 			// Insert mode: software cursor inverse is preserved when hardware cursor remains false
 			const lines = editor.render(30);
-			expect(lines[0]).toBe(cursorLine);
+			expect(lines[1]).toBe(cursorLine);
 		} finally {
 			renderSpy.mockRestore();
 		}

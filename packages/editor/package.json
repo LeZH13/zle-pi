@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-editor",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "A Vim-style Pi prompt editor with a session-name badge and a shell-command clipboard picker.",
   "type": "module",
   "keywords": [

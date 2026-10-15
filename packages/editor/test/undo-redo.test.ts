@@ -14,6 +14,8 @@ function makeEditor(): NamedSessionEditor {
 		theme as never,
 		{ matches: () => false } as never,
 		() => "my-session",
+		() => ({} as never),
+		() => true,
 	);
 }
 

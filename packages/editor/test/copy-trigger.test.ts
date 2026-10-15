@@ -11,6 +11,8 @@ function setup() {
 		tui as never, { borderColor: (text: string) => text, selectList: {} as never },
 		{ matches: (data: string, action: string) => action === "tui.input.submit" && matchesKey(data, "enter") } as never,
 		() => undefined,
+		() => ({} as never),
+		() => true,
 	);
 	editor.focused = true;
 	const menu = {

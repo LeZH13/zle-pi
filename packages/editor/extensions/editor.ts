@@ -1,8 +1,9 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { copyToClipboard, CustomEditor } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { CommandCopyMenu } from "../lib/command-copy.js";
 import { collectShellCommands, type ShellCommand } from "../lib/shell-commands.js";
+import { WorkingBorderTrail } from "../lib/working-border.js";
 
 export type ModalMode = "normal" | "insert";
 
@@ -200,6 +201,8 @@ function wordBoundary(
 }
 
 export class NamedSessionEditor extends CustomEditor {
+	private workingBorder: WorkingBorderTrail;
+	private borderStatus: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0];
 	/** Build an inline menu without changing editor focus. */
 	onCopyCommand: (() => CommandCopyMenu) | undefined;
 	onCopyStatus: ((message: string, type: "info" | "error") => void) | undefined;
@@ -233,8 +236,11 @@ export class NamedSessionEditor extends CustomEditor {
 		theme: ConstructorParameters<typeof CustomEditor>[1],
 		private readonly copyKeybindings: ConstructorParameters<typeof CustomEditor>[2],
 		private getSessionName: () => string | undefined,
+		getTheme: () => Theme,
+		isCurrentEditor: () => boolean,
 	) {
 		super(tui, theme, copyKeybindings, { embedWorkingStatus: true });
+		this.workingBorder = new WorkingBorderTrail(tui, getTheme, isCurrentEditor);
 		const internals = this as unknown as EditorInternals;
 		const base = internals.pushUndoSnapshot.bind(this);
 		this.basePushUndo = base;
@@ -272,8 +278,17 @@ export class NamedSessionEditor extends CustomEditor {
 		this.tui?.terminal?.write?.(shape);
 	}
 
+	override setWorkingStatusIndicator(indicator: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0]): void {
+		super.setWorkingStatusIndicator(indicator);
+		this.borderStatus = indicator;
+		this.workingBorder.setActive(indicator !== undefined);
+	}
+
 	dispose(): void {
+		if (this.disposed) return;
 		this.disposed = true;
+		this.workingBorder.dispose();
+		this.borderStatus = undefined;
 		this.closeCopyMode();
 		this.lastShapeWritten = undefined;
 		if (this.tui?.terminal?.write) {
@@ -674,6 +689,14 @@ export class NamedSessionEditor extends CustomEditor {
 		const autocompleteHeight =
 			(this as unknown as { renderedAutocompleteHeight?: number }).renderedAutocompleteHeight ?? 0;
 		const borderIndex = lines.length - 1 - autocompleteHeight;
+		const paintLabel = this.workingBorder.paint(lines, borderIndex, width, this.borderColor, this.borderStatus);
+		// Compose labels using the same frame and terminal-column coordinates as the border.
+		lines[0] = renderTopBorderWithBadge(
+			lines[0]!, this.getSessionName(), width, (text) => {
+				const native = this.borderColor(text);
+				return paintLabel ? paintLabel(native, width - visibleWidth(text), 0) : native;
+			},
+		);
 		if (borderIndex >= 0 && borderIndex < lines.length) {
 			lines[borderIndex] = renderBottomBorderWithMode(
 				lines[borderIndex]!,
@@ -681,7 +704,10 @@ export class NamedSessionEditor extends CustomEditor {
 				this.pendingLeader,
 				this.pendingCount,
 				width,
-				this.borderColor,
+				(text) => {
+					const native = this.borderColor(text);
+					return paintLabel ? paintLabel(native, 0, borderIndex) : native;
+				},
 			);
 		}
 		if (this.copyMenuVisible && this.copyMenu) {
@@ -689,15 +715,6 @@ export class NamedSessionEditor extends CustomEditor {
 			return [...lines, ...this.copyMenu.render(width, maxHeight)];
 		}
 		return lines;
-	}
-
-	protected override renderTopBorder(width: number, hiddenLineCount: number): string {
-		return renderTopBorderWithBadge(
-			super.renderTopBorder(width, hiddenLineCount),
-			this.getSessionName(),
-			width,
-			this.borderColor,
-		);
 	}
 }
 
@@ -738,8 +755,9 @@ export default function editorExtension(pi: ExtensionAPI): void {
 		const factory: EditorFactory = (tui, theme, keybindings) => {
 			requestRender = () => tui.requestRender();
 			activeEditor?.dispose();
-			const editor = new NamedSessionEditor(tui, theme, keybindings, () =>
-				sessionCtx.sessionManager.getSessionName(),
+			const editor: NamedSessionEditor = new NamedSessionEditor(
+				tui, theme, keybindings, () => sessionCtx.sessionManager.getSessionName(), () => sessionCtx.ui.theme,
+				() => activeEditor === editor && sessionCtx.ui.getEditorComponent() === ourFactory,
 			);
 			editor.onCopyCommand = () => new CommandCopyMenu(
 				collectShellCommands(sessionCtx.sessionManager.getBranch()), tui, () => sessionCtx.ui.theme, keybindings,

@@ -20,7 +20,7 @@ Then launch Pi in TUI mode or run `/reload`.
 
 - **Named session** (`/name foo`, `--name foo`, `pi.setSessionName()`): top border ends with ` foo ──`, one leading space, two trailing dashes, same color as the editor dividers.
 - **Unnamed session** (undefined, empty, or whitespace-only): native Pi border untouched.
-- **Working / scroll states**: the badge composes over `super.renderTopBorder()`, so the working spinner (`── ◐ Working…`) and scroll indicator (`↑ N more`) keep their native positions on the left/center.
+- **Working / scroll states**: the working spinner (`── ◐ Working…`) and scroll indicator (`↑ N more`) keep their native positions on the left/center. While a native working, retry, compaction, or branch-summary indicator is active, a softly fading trail in the current thinking-level color sweeps clockwise over the border fill, native working spinner/text, session name, and Vim mode label: left-to-right across the top, then right-to-left across the bottom, with invisible side transitions. The trail uses a lighter shade of the current thinking-level color (or Bash-mode color) on dark themes, and a deeper shade on light themes, fading smoothly into the unchanged base border color. No rainbow or unrelated accent colors are used. The circuit takes six seconds and the tail spans one-third of the virtual perimeter; the native working spinner/text, session-name badge, and INSERT/NORMAL text (including pending Vim keys) light up as that same trail passes through their columns, then fade back to their native styling. NORMAL retains its bold emphasis. The spinner keeps its native frame animation—there is no separate pulse. Retry/compaction/branch-summary status text, scroll labels, and editor content stay steady. Idle borders are unchanged, with no animation timer. Autocomplete and the command-copy menu are not animated.
 - **Narrow terminals / long names**: names truncate with `…`; if fewer than 8 columns remain for the badge, the native border wins.
 - **Conflicts**: if another custom editor is already active (e.g. Zentui), this extension defers and notifies once per session. Both the `$$` trigger and `/copy-command` require this extension to own the editor.
 
@@ -51,7 +51,9 @@ Even a single match shows a preview before copying. Clipboard failures leave the
 
 Copying uses Pi's public `copyToClipboard()` utility. Native clipboard failures are reported; remote/headless terminal clipboard delivery via OSC 52 may be best effort and depends on terminal/multiplexer support. This is a terminal-UI-only feature, not an RPC/print-mode clipboard tool.
 
-### Unreleased 0.4.0 change
+### Unreleased 0.4.1 changes
+
+The working border now has a circling single-hue gradient trail derived from the native thinking-level color, including the working spinner/text, session name, and Vim mode label in that same moving trail while preserving the editor layout and NORMAL-mode emphasis. It stops when the native busy indicator clears and releases its timer when the editor is replaced, reloaded, or shut down. There are no new commands or settings.
 
 An initial manually typed `$$` is now reserved for editable command-copy mode in INSERT mode. The menu stays attached to the editor rather than replacing it, and only shell code blocks are eligible—not Bash tool calls. Paste literal `$$` when needed. Existing NORMAL-mode `$` motions and Pi's `!`/`!!` Bash input are unchanged.
 
