@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-editor",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "A Vim-style Pi prompt editor with a session-name badge and a shell-command clipboard picker.",
   "type": "module",
   "keywords": [
@@ -25,7 +25,8 @@
     "access": "public"
   },
   "dependencies": {
-    "marked": "^18.0.11"
+    "marked": "^18.0.11",
+    "sh-syntax": "^0.7.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",

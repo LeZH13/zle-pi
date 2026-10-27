@@ -3,7 +3,7 @@ import { matchesKey, stripTerminalSequences, visibleWidth } from "@earendil-work
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import editorExtension, { NamedSessionEditor } from "../extensions/editor.js";
 import { CommandCopyMenu } from "../lib/command-copy.js";
-import type { ShellCommand } from "../lib/shell-commands.js";
+import { collectShellCommandChoices, type ShellCommand } from "../lib/shell-commands.js";
 
 vi.mock("@earendil-works/pi-coding-agent", async importOriginal => ({
 	...await importOriginal<typeof import("@earendil-works/pi-coding-agent")>(),
@@ -46,6 +46,78 @@ function setup(commands = [command("npm test"), command("git status", 1)]) {
 beforeEach(() => vi.mocked(copyToClipboard).mockReset());
 
 describe("inline copy interaction", () => {
+	it("copies one parsed command or the labelled whole block from a multi-command fence", async () => {
+		const script = "git status\ngit diff --stat\ngit log -5";
+		const choices = await collectShellCommandChoices([{ type: "message", id: "a", message: {
+			role: "assistant", stopReason: "stop", content: [{ type: "text", text: `\`\`\`bash\n${script}\n\`\`\`` }],
+		} } as never]);
+		const { editor } = setup(choices);
+		type(editor, "$$diff");
+		expect(editor.render(100).join("\n")).toContain("whole block");
+		editor.handleInput("\r");
+		await tick();
+		expect(copyToClipboard).toHaveBeenLastCalledWith("git diff --stat");
+		type(editor, "$$diff");
+		editor.handleInput("\x1b[B");
+		expect(editor.render(100).join("\n")).toContain("whole block · 3 lines");
+		editor.handleInput("\r");
+		await tick();
+		expect(copyToClipboard).toHaveBeenLastCalledWith(script);
+	});
+
+	it("keeps query edits and dismissal while parsing, without submitting premature Enter", async () => {
+		const { editor, createMenu, submit } = setup();
+		let resolve!: (menu: CommandCopyMenu) => void;
+		editor.onCopyCommand = () => new Promise(done => { resolve = done; });
+		type(editor, "$$git");
+		expect(editor.render(80).join("\n")).toContain("Loading shell commands");
+		editor.handleInput("\x1b[A");
+		editor.handleInput("\x1b[B");
+		expect(editor.getText()).toBe("$$git");
+		editor.handleInput("\r");
+		expect(copyToClipboard).not.toHaveBeenCalled();
+		expect(submit).not.toHaveBeenCalled();
+		editor.handleInput("\x1b");
+		resolve(createMenu());
+		await tick();
+		expect(editor.render(80).join("\n")).not.toContain("Copy command");
+		editor.handleInput("\r"); // reopen, not copy
+		editor.handleInput("\r");
+		await tick();
+		expect(copyToClipboard).toHaveBeenCalledExactlyOnceWith("git status");
+	});
+
+	it.each(["replacement", "disposal"])("ignores parsing completed after %s", async action => {
+		const { editor, createMenu, status } = setup();
+		let resolve!: (menu: CommandCopyMenu) => void;
+		editor.onCopyCommand = () => new Promise(done => { resolve = done; });
+		type(editor, "$$");
+		if (action === "replacement") editor.setText("new draft");
+		else editor.dispose();
+		resolve(createMenu());
+		await tick();
+		expect(editor.render(80).join("\n")).not.toContain("Copy command");
+		expect(status).not.toHaveBeenCalled();
+	});
+
+	it("reports asynchronous loading failures without submitting the query", async () => {
+		const { editor, status, submit, createMenu } = setup();
+		editor.onCopyCommand = async () => { throw new Error("Unreadable session"); };
+		type(editor, "$$");
+		await tick();
+		expect(status).toHaveBeenCalledWith("Command copy failed: Unreadable session", "error");
+		expect(submit).not.toHaveBeenCalled();
+		editor.onCopyCommand = async () => createMenu();
+		type(editor, "git");
+		editor.handleInput("\r"); // retry after failure, not copy or submit
+		await tick();
+		expect(editor.render(80).join("\n")).toContain("git status");
+		expect(copyToClipboard).not.toHaveBeenCalled();
+		expect(submit).not.toHaveBeenCalled();
+		editor.handleInput("\r");
+		await tick();
+		expect(copyToClipboard).toHaveBeenCalledExactlyOnceWith("git status");
+	});
 	it("preserves the editable prefix and previews even one candidate before copying", async () => {
 		const { editor, submit, tui, status } = setup([command("npm test")]);
 		type(editor, "$$");
@@ -83,7 +155,7 @@ describe("inline copy interaction", () => {
 	it("never submits copy queries with Enter or follow-up keys, including no matches", async () => {
 		const { editor, submit } = setup();
 		type(editor, "$$no-match");
-		expect(editor.render(60).join("\n")).toContain("No matching shell code blocks");
+		expect(editor.render(60).join("\n")).toContain("No matching shell commands");
 		editor.handleInput("\r");
 		editor.handleInput("\x1b\r");
 		editor.handleInput("\t");
@@ -286,6 +358,7 @@ describe("extension wiring", () => {
 			h.start();
 			await h.command();
 			expect(h.editor.getText()).toBe("$$");
+			await vi.waitFor(() => expect(h.editor.render(80).join("\n")).toContain("echo prose-only"));
 			const rendered = h.editor.render(80).join("\n");
 			expect(rendered).toContain("echo prose-only");
 			expect(rendered).not.toContain("tool-excluded");
@@ -302,7 +375,7 @@ describe("extension wiring", () => {
 			expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Clear the editor"), "error");
 			h.editor.setText("");
 			type(h.editor, "$$");
-			expect(h.editor.render(80).join("\n")).toContain("Copy command");
+			await vi.waitFor(() => expect(h.editor.render(80).join("\n")).toContain("Copy command"));
 		} finally { h.stop(); }
 		expect(h.editor.render(80).join("\n")).not.toContain("Copy command");
 	});

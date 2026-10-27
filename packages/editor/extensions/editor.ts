@@ -2,7 +2,7 @@ import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-c
 import { copyToClipboard, CustomEditor } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, matchesKey, sliceByColumn, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { CommandCopyMenu } from "../lib/command-copy.js";
-import { collectShellCommands, type ShellCommand } from "../lib/shell-commands.js";
+import { collectShellCommandChoices, type ShellCommand } from "../lib/shell-commands.js";
 import { WorkingBorderTrail } from "../lib/working-border.js";
 
 export type ModalMode = "normal" | "insert";
@@ -204,13 +204,15 @@ export class NamedSessionEditor extends CustomEditor {
 	private workingBorder: WorkingBorderTrail;
 	private borderStatus: Parameters<CustomEditor["setWorkingStatusIndicator"]>[0];
 	/** Build an inline menu without changing editor focus. */
-	onCopyCommand: (() => CommandCopyMenu) | undefined;
+	onCopyCommand: (() => CommandCopyMenu | Promise<CommandCopyMenu>) | undefined;
 	onCopyStatus: ((message: string, type: "info" | "error") => void) | undefined;
 	private copyPrefixPending = false;
 	private copyPrefixEditing = false;
 	private copyPasteActive = false;
 	private copyMode = false;
 	private copyMenu: CommandCopyMenu | undefined;
+	private copyLoadRevision = 0;
+	private copyLoading = false;
 	private copyMenuVisible = false;
 	private copyRevision = 0;
 	private copying = false;
@@ -461,6 +463,8 @@ export class NamedSessionEditor extends CustomEditor {
 
 	private closeCopyMode(): void {
 		this.copyMode = false;
+		this.copyLoadRevision++;
+		this.copyLoading = false;
 		this.copyMenu = undefined;
 		this.copyMenuVisible = false;
 		this.copyPrefixPending = false;
@@ -471,12 +475,29 @@ export class NamedSessionEditor extends CustomEditor {
 		this.copyMode = true;
 		this.copyPrefixEditing = true;
 		(this as unknown as EditorInternals).cancelAutocomplete();
-		try {
-			this.copyMenu = this.onCopyCommand!();
-			this.copyMenu.setQuery(this.getExpandedText().slice(2));
-			this.copyMenuVisible = true;
-		} catch (error) {
+		this.copyMenuVisible = true;
+		this.copyLoading = true;
+		const revision = ++this.copyLoadRevision;
+		const apply = (menu: CommandCopyMenu) => {
+			if (this.disposed || revision !== this.copyLoadRevision) return;
+			this.copyLoading = false;
+			this.copyMenu = menu;
+			menu.setQuery(this.getExpandedText().slice(2));
+			this.tui?.requestRender?.();
+		};
+		const fail = (error: unknown) => {
+			if (this.disposed || revision !== this.copyLoadRevision) return;
+			this.copyLoading = false;
+			this.copyMenuVisible = false;
 			this.onCopyStatus?.(`Command copy failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+			this.tui?.requestRender?.();
+		};
+		try {
+			const menu = this.onCopyCommand!();
+			if (menu instanceof Promise) void menu.then(apply).catch(fail);
+			else apply(menu);
+		} catch (error) {
+			fail(error);
 		}
 		this.tui?.requestRender?.();
 	}
@@ -536,7 +557,9 @@ export class NamedSessionEditor extends CustomEditor {
 				return;
 			}
 			if (this.copyKeybindings.matches(data, "tui.select.confirm") || this.copyKeybindings.matches(data, "tui.input.submit")) {
-				if (!this.copyMenuVisible) {
+				if (!this.copyMenu && !this.copyLoading) {
+					this.activateCopyMode();
+				} else if (!this.copyMenuVisible) {
 					this.copyMenuVisible = true;
 					this.tui?.requestRender?.();
 				} else if (this.copyMenu?.selected) void this.copySelected(this.copyMenu.selected);
@@ -544,6 +567,9 @@ export class NamedSessionEditor extends CustomEditor {
 			}
 			if (this.copyKeybindings.matches(data, "app.message.followUp") || matchesKey(data, "tab")) return;
 			if (this.copyMenuVisible && this.copyMenu?.handleInput(data)) return;
+			if (this.copyMenuVisible && !this.copyMenu && ([
+				"tui.select.up", "tui.select.down", "tui.select.pageUp", "tui.select.pageDown",
+			] as const).some(action => this.copyKeybindings.matches(data, action))) return;
 			if (cancel) {
 				this.closeCopyMode();
 				this.copyPrefixEditing = false;
@@ -710,6 +736,9 @@ export class NamedSessionEditor extends CustomEditor {
 				},
 			);
 		}
+		if (this.copyMenuVisible && this.copyLoading && this.tui.terminal.rows > lines.length + 4) {
+			return [...lines, truncateToWidth("Loading shell commands…", width)];
+		}
 		if (this.copyMenuVisible && this.copyMenu) {
 			const maxHeight = Math.max(0, this.tui.terminal.rows - lines.length - 4);
 			return [...lines, ...this.copyMenu.render(width, maxHeight)];
@@ -759,8 +788,8 @@ export default function editorExtension(pi: ExtensionAPI): void {
 				tui, theme, keybindings, () => sessionCtx.sessionManager.getSessionName(), () => sessionCtx.ui.theme,
 				() => activeEditor === editor && sessionCtx.ui.getEditorComponent() === ourFactory,
 			);
-			editor.onCopyCommand = () => new CommandCopyMenu(
-				collectShellCommands(sessionCtx.sessionManager.getBranch()), tui, () => sessionCtx.ui.theme, keybindings,
+			editor.onCopyCommand = async () => new CommandCopyMenu(
+				await collectShellCommandChoices(sessionCtx.sessionManager.getBranch()), tui, () => sessionCtx.ui.theme, keybindings,
 			);
 			editor.onCopyStatus = (message, type) => {
 				if (activeEditor === editor) sessionCtx.ui.notify(message, type);

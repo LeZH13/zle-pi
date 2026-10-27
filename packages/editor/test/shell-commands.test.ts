@@ -1,7 +1,7 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, JsonObject, TextContent, ToolCall, Usage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { collectShellCommands, MAX_COMMAND_REPLIES } from "../lib/shell-commands.js";
+import { collectShellCommandChoices, collectShellCommands, MAX_COMMAND_REPLIES } from "../lib/shell-commands.js";
 
 const NO_USAGE: Usage = {
 	input: 0,
@@ -70,6 +70,103 @@ function info(id: string, parentId: string | null): SessionEntry {
 /** Scan one assistant reply's content as the leaf of a one-entry branch. */
 const commandsOf = (content: AssistantMessage["content"], stopReason: AssistantMessage["stopReason"] = "stop") =>
 	collectShellCommands([assistant("e", null, content, stopReason)]);
+
+describe("collectShellCommandChoices", () => {
+	const choicesOf = (script: string, language = "bash") =>
+		collectShellCommandChoices([assistant("e", null, [text(fenceMd(language, script))])]);
+
+	it("offers individual commands in order, then an explicitly labelled whole block", async () => {
+		const script = "git status\ngit diff --stat\ngit log -5";
+		const choices = await choicesOf(script);
+		expect(choices.map(choice => choice.text)).toEqual([...script.split("\n"), script]);
+		expect(choices.at(-1)).toEqual({ id: "e:0", text: script, language: "bash", reply: 0, wholeBlock: true });
+		expect(choices.slice(0, -1).every(choice => !choice.wholeBlock)).toBe(true);
+		expect(new Set(choices.map(choice => choice.id)).size).toBe(4);
+	});
+
+	it.each([
+		"printf '%s\\n' a |\n  grep a",
+		"echo first &&\n  echo second || echo failed",
+		"printf '%s\\n' \\\n  one two",
+		"for x in a b; do\n  echo \"$x\"\ndone",
+		"if true; then\n  echo yes\nelse\n  echo no\nfi",
+		"while false; do\n  echo no\ndone",
+		"case x in\n  x) echo yes ;;\nesac",
+		"f() {\n  echo one\n  echo two\n}",
+		"(echo one; echo two)",
+		"{ echo one; echo two; }",
+		"echo \"$(echo one; echo two)\"",
+		"printf '%s' 'one\ntwo'",
+		"cat <<'EOF'\n$literal\necho not-a-command\nEOF",
+		"cat <<-EOF\n\ttabbed\n\tEOF",
+		"cat <<A <<B\none\nA\ntwo\nB",
+		"cat <<EOF | grep hello\nhello\nEOF",
+		"if true; then\ncat <<EOF\nhello\nEOF\nfi",
+	])("keeps a compound command intact: %s", async unit => {
+		const script = `${unit}\necho next`;
+		expect((await choicesOf(script)).map(choice => choice.text)).toEqual([unit, "echo next", script]);
+	});
+
+	it("does not duplicate single-command or comment-only blocks", async () => {
+		for (const script of ["echo hi", "# explanation\necho hi", "# comment only", "echo one | grep one"]) {
+			expect((await choicesOf(script)).map(choice => choice.text)).toEqual([script]);
+		}
+	});
+
+	it.each(["echo 'unterminated\necho next", "if true; then\necho next", "cat <<EOF\nmissing terminator"])(
+		"falls back to the original block on parse errors: %s", async script => {
+			expect((await choicesOf(script)).map(choice => choice.text)).toEqual([script]);
+		},
+	);
+
+	it("preserves UTF-8, comments, indentation, background operators, and semicolons", async () => {
+		const script = "# first\n  echo 😀中 # inline\n\n# second\n\techo café &\necho done; echo last";
+		expect((await choicesOf(script)).map(choice => choice.text)).toEqual([
+			"# first\n  echo 😀中 # inline", "# second\n\techo café &", "echo done; ", "echo last", script,
+		]);
+	});
+
+	it("keeps interleaved heredocs whole rather than offering broken commands", async () => {
+		const script = "cat <<EOF; echo next\nbody\nEOF";
+		expect((await choicesOf(script)).map(choice => choice.text)).toEqual([script]);
+	});
+
+	it("keeps blocks whole when trimming would leave a dangling continuation", async () => {
+		for (const slashes of [1, 3]) {
+			const script = `echo first${"\\".repeat(slashes)}\n\necho second`;
+			expect((await choicesOf(script)).map(choice => choice.text)).toEqual([script]);
+		}
+	});
+
+	it("still splits commands ending in an escaped literal backslash", async () => {
+		const unit = "echo first" + "\\".repeat(2);
+		const script = `${unit}\necho second`;
+		expect((await choicesOf(script)).map(choice => choice.text)).toEqual([unit, "echo second", script]);
+	});
+
+	it("retains escaped trailing spaces in individual commands", async () => {
+		const unit = "echo trailing\\ ";
+		const script = `${unit}\necho next`;
+		expect((await choicesOf(script)).map(choice => choice.text)).toEqual([unit, "echo next", script]);
+	});
+
+	it("preserves duplicate statements with unique ids across fences and replies", async () => {
+		const entries = [
+			assistant("old", null, [text(fenceMd("sh", "echo old"))]),
+			assistant("new", "old", [text(fenceMd("bash", "echo dup\necho dup") + fenceMd("shell", "echo third"))]),
+		];
+		const choices = await collectShellCommandChoices(entries);
+		expect(choices.map(choice => choice.text)).toEqual(["echo dup", "echo dup", "echo dup\necho dup", "echo third", "echo old"]);
+		expect(new Set(choices.map(choice => choice.id)).size).toBe(5);
+		expect(choices.map(choice => choice.reply)).toEqual([0, 0, 0, 0, 1]);
+	});
+
+	it("keeps unsupported zsh syntax whole", async () => {
+		const unit = "for x (a b) { echo $x }";
+		const script = `${unit}\necho next`;
+		expect((await choicesOf(script, "zsh")).map(choice => choice.text)).toEqual([script]);
+	});
+});
 
 describe("collectShellCommands", () => {
 	it("collects nothing from empty or assistant-less sessions", () => {

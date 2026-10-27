@@ -32,7 +32,7 @@ export class CommandCopyMenu implements Component {
 		return new SelectList(this.matches.map(command => ({
 			value: command.id,
 			label: displayText(command.text).split("\n").find(line => line.trim()) ?? "",
-			description: `R${command.reply} · ${command.language}`,
+			description: `R${command.reply} · ${command.language}${command.wholeBlock ? " · whole block" : ""}`,
 		})), this.listSize, getSelectListTheme());
 	}
 
@@ -95,13 +95,13 @@ export class CommandCopyMenu implements Component {
 		if (!this.matches.length) {
 			return [
 				theme.fg("accent", "Copy command · edit $$ to filter"),
-				theme.fg("muted", this.commands.length ? "No matching shell code blocks" : "No shell code blocks in the last 10 assistant replies"),
+				theme.fg("muted", this.commands.length ? "No matching shell commands" : "No shell code blocks in the last 10 assistant replies"),
 			].slice(0, maxHeight).map(line => truncateToWidth(line, width));
 		}
 		const listLines = this.list.render(width);
 		const lineCount = selected?.text.split("\n").length ?? 0;
 		const meta = selected
-			? `R${selected.reply} · ${selected.language} · ${lineCount} ${lineCount === 1 ? "line" : "lines"}`
+			? `R${selected.reply} · ${selected.language}${selected.wholeBlock ? " · whole block" : ""} · ${lineCount} ${lineCount === 1 ? "line" : "lines"}`
 			: "No command selected";
 		const previewHeight = Math.max(1, Math.min(6, maxHeight - listLines.length - 4));
 		this.preview.updateLayout(this.previewText.render(width).length, previewHeight, () => this.tui.requestRender());

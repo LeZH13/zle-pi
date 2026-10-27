@@ -1,5 +1,6 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { Marked, type Tokens } from "marked";
+import { LangVariant, parse } from "sh-syntax";
 
 /**
  * A shell command recovered from the session's recent replies: a labeled
@@ -14,6 +15,8 @@ export interface ShellCommand {
 	language: string;
 	/** 0-based index of the assistant reply within the newest-first scan (0 = newest reply). */
 	reply: number;
+	/** Present on the original block when individual command choices are also available. */
+	wholeBlock?: true;
 }
 
 /** Number of most recent assistant replies scanned on the current branch. */
@@ -87,4 +90,52 @@ export function collectShellCommands(entries: readonly SessionEntry[]): ShellCom
 		}
 	}
 	return commands;
+}
+
+/**
+ * Offer top-level shell statements before their original block. Slice UTF-8
+ * source ranges rather than reprinting the AST, preserving quotes, indentation,
+ * continuations, comments, and heredocs. Parsing never executes shell code.
+ */
+export async function collectShellCommandChoices(entries: readonly SessionEntry[]): Promise<ShellCommand[]> {
+	const choices: ShellCommand[] = [];
+	// Parse sequentially to bound the number of live WASM instances.
+	for (const block of collectShellCommands(entries)) {
+		try {
+			const options = {
+				keepComments: true,
+				variant: block.language === "zsh" ? LangVariant.LangZsh : LangVariant.LangBash,
+			};
+			const ast = await parse(block.text, options);
+			if (ast.Stmts.length > 1) {
+				const source = Buffer.from(block.text, "utf8");
+				const starts = ast.Stmts.map(statement => {
+					const start = Math.min(statement.Pos.Offset, ...statement.Comments.map(comment => comment.Pos.Offset));
+					// Retain leading indentation when the statement starts on its own line.
+					const lineStart = start === 0 ? 0 : source.lastIndexOf(10, start - 1) + 1;
+					return /^[ \t]*$/u.test(source.subarray(lineStart, start).toString("utf8")) ? lineStart : start;
+				});
+				// Stmt.End can precede a nested pipeline's heredoc body. Slice up to
+				// the next statement instead, then reparse every candidate: interleaved
+				// heredocs (e.g. `cat <<EOF; echo next`) cannot safely be separated.
+				const statements = starts.map((start, index) => source.subarray(start, starts[index + 1] ?? source.length)
+					.toString("utf8").replace(/\n(?:[ \t]*\n)*$/u, ""));
+				for (const statement of statements) {
+					// The parser accepts a dangling backslash at EOF. Removing the
+					// newline after an odd backslash run would change paste behavior.
+					if ((statement.match(/\\+$/u)?.[0].length ?? 0) % 2 === 1) {
+						throw new Error("Statement boundary would leave a dangling continuation");
+					}
+					await parse(statement, options);
+				}
+				choices.push(...statements.map((text, index) => ({ ...block, id: `${block.id}:command:${index}`, text })));
+				choices.push({ ...block, wholeBlock: true });
+				continue;
+			}
+		} catch {
+			// Unsupported dialects, incomplete scripts, or parser failures stay whole.
+		}
+		choices.push(block);
+	}
+	return choices;
 }
