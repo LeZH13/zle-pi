@@ -50,7 +50,8 @@ export const RISKY_RULES: readonly RiskyRule[] = [
 		description: "force push / branch deletion on a remote",
 		command: /^git$/,
 		sub: /^push$/,
-		args: /--force\b|--force-with-lease\b|--delete\b|(^|\s):[^\s]+|(^|\s)-f\b/,
+		// `git push origin +main` forces a ref update just as `--force` does.
+		args: /--force\b|--force-with-lease\b|--delete\b|(^|\s)[+:][^\s]+|(^|\s)-f\b/,
 	},
 	{
 		id: "git-clean-force",
@@ -513,7 +514,17 @@ function tokenText(token: ParsedToken): string {
 	return "";
 }
 
+/** Separators that end one command's word list. */
 const CONTROL_OPS = new Set(["&&", "||", ";", "|", "&"]);
+
+/**
+ * Redirection operators. shell-quote returns these as their own tokens; a
+ * redirect ends the current command's word list and the word that follows it is
+ * a target, not a command word. Both facts have to be boundaries: otherwise
+ * `npm run build > /tmp/log 2>&1 && rm -rf ~` collapses into the first command
+ * and the trailing `rm` is never matched.
+ */
+const REDIRECT_OPS = new Set([">", ">>", ">|", "&>", "&>>", "<>", "<", "<<", "<<<", ">&", "<&"]);
 
 /** One command's words plus the unquoted glob patterns it contains. */
 interface CommandGroup {
@@ -536,7 +547,17 @@ function commandsOf(tokens: ParsedToken[]): { commands: CommandGroup[]; subshell
 	};
 	let depth = 0;
 	let subshell: string[] = [];
+	// Set after a redirect operator: the next word is that operator's target.
+	// Heredocs are not modeled, so a `<<` body is still scanned as script text
+	// and over-flags rather than under-flags.
+	let skipTarget = false;
 	for (const token of tokens) {
+		if (skipTarget) {
+			if (typeof token === "string" || token.op === "glob") {
+				skipTarget = false;
+				continue;
+			}
+		}
 		if (typeof token !== "string" && token.op === "(") {
 			depth++;
 			if (depth > 1) subshell.push("(");
@@ -565,6 +586,9 @@ function commandsOf(tokens: ParsedToken[]): { commands: CommandGroup[]; subshell
 			globs.push(token.pattern ?? "");
 		} else if (CONTROL_OPS.has(token.op)) {
 			flush();
+		} else if (REDIRECT_OPS.has(token.op)) {
+			flush();
+			skipTarget = true;
 		}
 		// Comments are ignored.
 	}
@@ -596,7 +620,17 @@ function collectMatches(
 	visited: Set<string>,
 	depth: number,
 ): void {
-	if (depth > MAX_DEPTH || matches.length >= MAX_LEAVES) return;
+	if (matches.length >= MAX_LEAVES) return;
+	// The depth cap must not become a silent allow: past it the guard cannot see
+	// the nested script at all, so escalate and let Jev (or the user) decide.
+	if (depth > MAX_DEPTH) {
+		matches.push({
+			ruleId: "nesting-too-deep",
+			description: `command nesting exceeds ${MAX_DEPTH} levels; the nested script was not inspected`,
+			segment: script.slice(0, 120),
+		});
+		return;
+	}
 	for (const line of splitLines(script)) {
 		if (visited.has(line)) continue;
 		visited.add(line);

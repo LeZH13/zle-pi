@@ -235,6 +235,62 @@ describe("rules: false positives", () => {
 	});
 });
 
+describe("rules: redirects are command boundaries", () => {
+	it("sees past a redirect to the next command", () => {
+		expect(ids("npm run build > /tmp/log 2>&1 && rm -rf ~")).toContain("rm-recursive-force-glob");
+		expect(ids("rm -rf / > /dev/null")).toContain("rm-recursive-force-glob");
+		expect(ids("echo ok > out.txt && git reset --hard")).toContain("git-reset-hard");
+		expect(ids("cat x > y && docker system prune")).toContain("docker-system-prune");
+		expect(ids("cmd 2>err; git push -f origin main")).toContain("git-push-force");
+		expect(ids("make > build.log 2>>build.err && git clean -fd")).toContain("git-clean-force");
+		expect(ids("cmd >| out && rm -rf /x")).toContain("rm-recursive-force-glob");
+	});
+
+	it("treats a redirect target as a target, not a command word", () => {
+		expect(ids("npm run build > rm")).toEqual([]);
+		expect(ids("tsc > log ; ls")).toEqual([]);
+		expect(ids("echo hi &>/dev/null")).toEqual([]);
+		// A redirect target is data: it never becomes the command word.
+		expect(ids("make > dd")).toEqual([]);
+		expect(ids("cmd > mkfs.ext4")).toEqual([]);
+		expect(ids("make > out && dd if=a of=b")).toContain("dd");
+		expect(ids("rm old.txt > log.txt")).toEqual([]);
+	});
+
+	it("does not flag quoting-quoted substitutions behind a redirect", () => {
+		expect(ids("echo '$(rm -rf /x)' > out")).toEqual([]);
+		expect(ids('echo "$(rm -rf /x)" > out')).toContain("rm-recursive-force-glob");
+	});
+});
+
+describe("rules: nesting cap fails closed", () => {
+	function nest(levels: number): string {
+		let command = "rm -rf /";
+		for (let i = 0; i < levels; i++) command = `bash -c ${JSON.stringify(command)}`;
+		return command;
+	}
+
+	it("flags nesting past the depth cap instead of allowing it silently", () => {
+		expect(ids(nest(3))).toContain("rm-recursive-force-glob");
+		const deep = ids(nest(12));
+		expect(deep).toContain("nesting-too-deep");
+	});
+
+	// Past the cap the guard cannot inspect the body, so it flags rather than
+	// guesses - which holds for benign scripts too, by design (fail closed).
+	it("flags benign deep nesting too, rather than guessing", () => {
+		expect(ids(nest(12).replace("rm -rf /", "echo hi"))).toEqual(["nesting-too-deep"]);
+	});
+});
+
+describe("rules: git force refspecs", () => {
+	it("flags a leading + refspec as a force push", () => {
+		expect(ids("git push origin +main")).toContain("git-push-force");
+		expect(ids("git push origin +refs/heads/main:refs/heads/main")).toContain("git-push-force");
+		expect(ids("git push origin main")).toEqual([]);
+	});
+});
+
 describe("rules: user patterns", () => {
 	it("extra risky patterns match the full command", () => {
 		const extra = compilePatterns(["^make\\s+publish"]);

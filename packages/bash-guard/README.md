@@ -62,11 +62,15 @@ Contract for consumers:
 Every `bash` tool call is parsed and matched against a built-in table of risky patterns:
 
 - files: `rm` with `-r`/`-f`/unquoted globs, `find -delete`/`-exec rm`, `truncate`, `shred`, `dd`, `mkfs*`, `wipefs`, `chmod -R`/`chown -R`
-- git: `reset --hard`, force pushes and `:branch` deletes, `clean -f` (dry runs pass), `checkout --`/`restore`, `branch -D`, `stash drop/clear`
+- git: `reset --hard`, force pushes (`--force`, `-f`, `+refspec`, `:branch` deletes), `clean -f` (dry runs pass), `checkout --`/`restore`, `branch -D`, `stash drop/clear`
 - data and infra: destructive SQL via `psql`/`mysql`/`sqlite3`, `terraform destroy`/`apply -auto-approve`, `kubectl delete`, `docker rm/rmi/volume rm/system prune`, `aws s3 rm --recursive`/`s3 rb`
 - publishing: `npm unpublish`, `gh repo delete`
 
-Matching sees through compound commands, `$(...)`, backticks, `bash -c`/`sh -c`/`eval`, env assignments, wrappers (`sudo`, `env`, `xargs`, `timeout`, `nohup`, ...), git global options (`-C`, `-c`, ...), and shell control keywords. Quoted text is data: `echo "rm -rf /"` never matches.
+Matching sees through compound commands, redirects (`>`, `>>`, `2>&1`, `&>`, `<` - the target is not a command word), `$(...)`, backticks, `bash -c`/`sh -c`/`eval`, env assignments, wrappers (`sudo`, `env`, `xargs`, `timeout`, `nohup`, ...), git global options (`-C`, `-c`, ...), and shell control keywords. Quoted text is data: `echo "rm -rf /"` never matches.
+
+Nesting is followed up to 8 levels. Deeper scripts are not inspected, so they are flagged as `nesting-too-deep` and escalated rather than silently allowed - a benign script nested that deep asks once.
+
+The table is a **deny-list**: no match means the command runs immediately. It covers recognizable destructive shapes, not named tools (a script, `rsync --delete`, `helm uninstall`, or Python/Node code that deletes files is not modeled). Treat it as a speed bump that buys a classifier call, not as a sandbox.
 
 Then:
 
