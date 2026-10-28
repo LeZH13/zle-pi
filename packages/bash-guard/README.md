@@ -10,6 +10,8 @@ pi install npm:@zle13/pi-bash-guard
 pi -e npm:@zle13/pi-bash-guard   # try once
 ```
 
+**0.5.0:** `guard.allowBelow` now defaults to **0.25**, down from 0.5. The threshold only applies to commands that already matched a risky shape, so a mid-range score usually means the pattern does not really apply rather than that the command was verified safe. Expect more dialogs for the 0.25–0.5 band (`find -delete`, `docker system prune`, `git branch -D`); set `guard.allowBelow` back to 0.5 to keep the old behavior - your user-level config can, project configs cannot raise it.
+
 **0.5.0:** a project-level `<cwd>/.pi/bash-guard.json` may now only tighten the guard for its directory. Previously it could set `guard.enabled: false`, add `allowPatterns`, raise `allowBelow`, or repoint `jev.endpoint` - which let any cloned repo switch the guard off, whitelist commands, or send this machine's commands elsewhere. Those keys are now ignored with a warning; put them in `~/.pi/agent/bash-guard.json` instead.
 
 **0.4.1 fixes extension loading for managed installs on Pi 1.x.** Custom endpoints use Pi's exposed built-in provider API rather than a raw SDK subpath. Configuration and guard behavior are unchanged.
@@ -77,7 +79,7 @@ The table is a **deny-list**: no match means the command runs immediately. It co
 Then:
 
 1. Not risky, or matches one of your `allowPatterns`: runs immediately, no classifier call.
-2. Risky: Jev scores the probability of irreversible loss. Below `allowBelow` (default 0.5) it runs.
+2. Risky: Jev scores the probability of irreversible loss. Below `allowBelow` (default 0.25) it runs.
 3. Otherwise (high score, Jev error, timeout, malformed answer) it escalates per `approvalMode` (see above): ask mode shows *Allow once / Allow for this session / Block*; deny mode blocks. Without a UI, or if the tool call is aborted, it is blocked. "Allow for this session" remembers the exact command string, persisted on the session branch (restored approvals are ignored in deny mode).
 
 Allowed commands Jev judged get a dim line under them in the transcript, e.g. `⛨ bash-guard: jev p=0.31 recoverable` or `jev p=0.60 allowed by user`. Blocked commands carry the score in their block reason.
@@ -86,7 +88,9 @@ Only bash's call rendering is decorated; result rendering and other tools' rende
 
 Without a Jev classifier the guard runs **rules-only**: every risky command escalates, and a one-time notice says how to enable Jev.
 
-Calibration from live scores: routine cleanups (`rm -rf node_modules`/`dist`, `find -delete`, `docker system prune`) score about 0.2–0.48 and pass. `rm -rf ~` (≈0.95), `DROP DATABASE` (≈0.84), `rm -rf .git` (≈0.72), `push --force main` (≈0.61), `reset --hard HEAD~5` (≈0.52), and `git clean -fd` (≈0.57) escalate; `git branch -D` (≈0.35) passes as reflog-recoverable. Lower `allowBelow` to be stricter.
+Calibration from live scores: cleanups of a regenerable directory (`rm -rf node_modules`/`dist`) score about 0.2–0.3 and still pass at the default; `find -delete` and `docker system prune` (≈0.35–0.48) now escalate. `rm -rf ~` (≈0.95), `DROP DATABASE` (≈0.84), `rm -rf .git` (≈0.72), `push --force main` (≈0.61), `git clean -fd` (≈0.57), and `reset --hard HEAD~5` (≈0.52) escalate. `git branch -D` (≈0.35) escalates too, since the work moves to the reflog rather than staying put.
+
+`allowBelow` defaulted to 0.5 before 0.5.0. The threshold only applies to commands that already matched a risky shape, so a score near 0.5 means "this pattern probably does not apply here" more often than "verified recoverable" - at that setting the classifier's own uncertainty was enough to wave a command through. Raise it if the extra dialogs are not worth it; lower it to be stricter still.
 
 ## Watchdog
 
@@ -176,7 +180,7 @@ Set defaults for new sessions in `~/.pi/agent/bash-guard.json`, overridden by `<
   "guard": {
     "enabled": true,
     "approvalMode": "ask",
-    "allowBelow": 0.5,
+    "allowBelow": 0.25,
     "extraRiskyPatterns": ["^make\\s+publish"],
     "allowPatterns": ["^rm -rf /tmp/"]
   },

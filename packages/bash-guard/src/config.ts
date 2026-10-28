@@ -66,7 +66,7 @@ export const DEFAULT_CONFIG: BashGuardConfig = {
 	guard: {
 		enabled: true,
 		approvalMode: "ask",
-		allowBelow: 0.5,
+		allowBelow: 0.25,
 		extraRiskyPatterns: [],
 		allowPatterns: [],
 	},

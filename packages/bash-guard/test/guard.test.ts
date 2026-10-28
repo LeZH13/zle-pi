@@ -265,9 +265,21 @@ describe("guard decision flow", () => {
 
 describe("jev score on allowed outcomes", () => {
 	it("attaches the below-threshold Jev score to the allow outcome", async () => {
-		const jev = makeJev({ ok: true, p: 0.31, model: "t" });
+		const jev = makeJev({ ok: true, p: 0.12, model: "t" });
 		const outcome = await runGuard(makeDeps({ jev }), { command: RISKY_COMMAND, cwd: "/w" });
-		expect(outcome).toMatchObject({ action: "allow", jev: { p: 0.31, userApproved: false } });
+		expect(outcome).toMatchObject({ action: "allow", jev: { p: 0.12, userApproved: false } });
+	});
+
+	// The threshold sits below the lowest live score the README records for a
+	// risky-but-recoverable cleanup (rm -rf node_modules ~0.2), so a judge that
+	// is merely unsure escalates instead of passing on a coin flip.
+	it("escalates a merely uncertain score that the old 0.5 default would have passed", async () => {
+		const jev = makeJev({ ok: true, p: 0.42, model: "t" });
+		const deps = makeDeps({ jev, select: vi.fn(async () => "Block") });
+		const outcome = await runGuard(deps, { command: RISKY_COMMAND, cwd: "/w" });
+		expect(outcome.action).toBe("block");
+		expect(outcome.reason).toContain("p=0.42");
+		expect(outcome.reason).toContain("allowBelow=0.25");
 	});
 
 	it("attaches a user-approved score when the dialog allows once", async () => {
