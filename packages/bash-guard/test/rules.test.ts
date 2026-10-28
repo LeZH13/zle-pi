@@ -291,6 +291,76 @@ describe("rules: git force refspecs", () => {
 	});
 });
 
+
+describe("rules: expanded coverage", () => {
+	it("flags rsync that deletes from the destination", () => {
+		expect(ids("rsync -a --delete src/ dst/")).toContain("rsync-delete");
+		expect(ids("rsync -a --delete-after a b")).toContain("rsync-delete");
+		expect(ids("rsync --remove-source-files a b")).toContain("rsync-delete");
+		expect(ids("rsync -a src/ dst/")).toEqual([]);
+	});
+
+	it("flags compose down only when it destroys volumes", () => {
+		expect(ids("docker compose down -v")).toContain("docker-compose-down-volumes");
+		expect(ids("docker compose down --volumes")).toContain("docker-compose-down-volumes");
+		expect(ids("docker-compose down -v")).toContain("docker-compose-down-volumes");
+		expect(ids("docker compose down")).toEqual([]);
+		expect(ids("docker compose up -d")).toEqual([]);
+	});
+
+	it("flags helm uninstall and delete, not other helm verbs", () => {
+		expect(ids("helm uninstall prod")).toContain("helm-uninstall");
+		expect(ids("helm delete prod")).toContain("helm-uninstall");
+		expect(ids("helm list")).toEqual([]);
+	});
+
+	it("flags a SQL script file, which no regex can inspect", () => {
+		expect(ids("psql -f drop.sql")).toContain("psql-file");
+		expect(ids("psql --file drop.sql")).toContain("psql-file");
+		expect(ids("sqlite3 db '.read drop.sql'")).toContain("sql-client-script-file");
+		expect(ids("psql -c 'select 1'")).toEqual([]);
+		// -f is --force for mysql, not a file flag.
+		expect(ids("mysql -f x.sql")).toEqual([]);
+	});
+
+	it("flags history rewrites and reflog expiry", () => {
+		expect(ids("git filter-branch --tree-filter x HEAD")).toContain("git-filter-branch");
+		expect(ids("git filter-repo --path x")).toContain("git-filter-branch");
+		expect(ids("git reflog expire --expire=now --all")).toContain("git-reflog-expire");
+		expect(ids("git reflog show")).toEqual([]);
+	});
+
+	it("flags a force checkout or switch, which discards local changes", () => {
+		expect(ids("git checkout -f main")).toContain("git-checkout-force");
+		expect(ids("git switch --force main")).toContain("git-checkout-force");
+		expect(ids("git checkout main")).toEqual([]);
+		expect(ids("git switch main")).toEqual([]);
+	});
+
+	it("flags a redirect onto a database or raw device, whatever the command", () => {
+		expect(ids(": > prod.db")).toContain("redirect-truncate");
+		expect(ids("cat /dev/null > prod.db")).toContain("redirect-truncate");
+		expect(ids("true > data.sqlite")).toContain("redirect-truncate");
+		expect(ids("> out.db echo hi")).toContain("redirect-truncate");
+		expect(ids('echo "" > /dev/sda')).toContain("redirect-truncate");
+		expect(ids("cmd >> /dev/nvme0n1")).toContain("redirect-truncate");
+	});
+
+	it("does not flag ordinary redirects", () => {
+		expect(ids("cat x > app.log")).toEqual([]);
+		expect(ids("echo hi > notes.md")).toEqual([]);
+		expect(ids("ls > /tmp/list.txt")).toEqual([]);
+		expect(ids("echo 'keep' > .env.example")).toEqual([]);
+		expect(ids("git status 2>&1")).toEqual([]);
+	});
+
+	it("reports the exact command text that matched, not a redirect-stripped head", () => {
+		const scan = findRisky("cat x > y && rm -rf /tmp/build", BASE);
+		const match = scan.matches.find((entry) => entry.ruleId === "rm-recursive-force-glob");
+		expect(match?.segment).toBe("rm -rf /tmp/build");
+	});
+});
+
 describe("rules: user patterns", () => {
 	it("extra risky patterns match the full command", () => {
 		const extra = compilePatterns(["^make\\s+publish"]);

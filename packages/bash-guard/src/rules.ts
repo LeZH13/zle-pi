@@ -91,6 +91,27 @@ export const RISKY_RULES: readonly RiskyRule[] = [
 		args: /^(drop|clear)\b/,
 	},
 	{
+		id: "git-filter-branch",
+		description: "git filter-branch/filter-repo rewrites history",
+		command: /^git$/,
+		sub: /^(filter-branch|filter-repo)$/,
+		args: /^/,
+	},
+	{
+		id: "git-reflog-expire",
+		description: "git reflog expire discards the recovery trail",
+		command: /^git$/,
+		sub: /^reflog$/,
+		args: /^expire\b/,
+	},
+	{
+		id: "git-checkout-force",
+		description: "force checkout/switch discards uncommitted changes",
+		command: /^git$/,
+		sub: /^(checkout|switch)$/,
+		args: /(^|\s)(?:-[a-zA-Z]*f|--force)\b/,
+	},
+	{
 		id: "dd",
 		description: "dd writes raw blocks, a classic disk clobber",
 		command: /^dd$/,
@@ -225,6 +246,40 @@ export const RISKY_RULES: readonly RiskyRule[] = [
 		command: /^aws$/,
 		sub: /^s3$/,
 		args: /^rb\b/,
+	},
+	{
+		id: "rsync-delete",
+		description: "rsync --delete removes files absent from the source",
+		command: /^rsync$/,
+		args: /(^|\s)--delete(?:-\w+)?\b|(^|\s)--remove-source-files\b/,
+	},
+	{
+		id: "docker-compose-down-volumes",
+		description: "docker compose down -v destroys named volumes",
+		// Covers both the plugin (`docker compose down -v`) and the standalone
+		// binary (`docker-compose down -v`).
+		command: /^docker(-compose)?$/,
+		args: /^(?:compose\s+)?down\b[\s\S]*(?:(^|\s)-[a-zA-Z]*v\b|--volumes\b)/,
+	},
+	{
+		id: "helm-uninstall",
+		description: "helm uninstall removes a release and its resources",
+		command: /^helm$/,
+		sub: /^(uninstall|del|delete)$/,
+		args: /^/,
+	},
+	{
+		id: "psql-file",
+		description: "psql -f runs a script file, which the guard cannot inspect",
+		// Only psql spells the file flag `-f`; for mysql `-f` means --force.
+		command: /^psql$/,
+		args: /(^|\s)(?:-f|--file)[\s=]*\S/,
+	},
+	{
+		id: "sql-client-script-file",
+		description: "a SQL client runs a script file, which the guard cannot inspect",
+		command: /^(mysql|sqlite3)$/,
+		args: /(^|\s)--file[\s=]*\S|(^|\s)\.read\b/,
 	},
 ];
 
@@ -526,21 +581,48 @@ const CONTROL_OPS = new Set(["&&", "||", ";", "|", "&"]);
  */
 const REDIRECT_OPS = new Set([">", ">>", ">|", "&>", "&>>", "<>", "<", "<<", "<<<", ">&", "<&"]);
 
+/** Redirects that write (and can therefore destroy) their target. */
+const WRITE_REDIRECT_OPS = new Set([">", ">>", ">|", "&>", "&>>", "<>", ">&"]);
+
+/**
+ * Paths whose truncation loses data. A redirect onto any of these is the same
+ * damage as `truncate`, which the table already blocks.
+ */
+const DESTRUCTIVE_REDIRECT_TARGET = /^(?:\/dev\/(?:sd|disk|hd|nvme|vd|mmcblk|md)[a-z0-9]*|.*\.(?:db|sqlite3?|mdb)$|proc\.db)$/;
+
+/**
+ * The one rule that is not matched against a command word. `: > prod.db` and
+ * `cat /dev/null > prod.db` have no destructive command at all - the redirect
+ * alone truncates the file - so this fires on the target and takes its segment
+ * from the line that carried the redirect.
+ */
+export const REDIRECT_RULE: RiskyRule = {
+	id: "redirect-truncate",
+	description: "a redirect truncates a database or raw device",
+	command: /.*/,
+	args: /^/,
+};
+
 /** One command's words plus the unquoted glob patterns it contains. */
 interface CommandGroup {
 	words: string[];
 	globs: string[];
+	/** Text of the command as the user wrote it, before redirects split it. */
+	segment: string;
 }
 
 /** Group parsed tokens into one word-list per command. */
-function commandsOf(tokens: ParsedToken[]): { commands: CommandGroup[]; subshells: string[] } {
+function commandsOf(tokens: ParsedToken[]): { commands: CommandGroup[]; subshells: string[]; redirects: string[] } {
 	const commands: CommandGroup[] = [];
 	const subshells: string[] = [];
+	// Unquoted targets of write redirects, as the segment they occurred in.
+	const redirects: string[] = [];
 	let words: string[] = [];
 	let globs: string[] = [];
+	let current = "";
 	const flush = () => {
 		if (words.length > 0 || globs.length > 0) {
-			commands.push({ words, globs });
+			commands.push({ words, globs, segment: current });
 			words = [];
 			globs = [];
 		}
@@ -551,9 +633,11 @@ function commandsOf(tokens: ParsedToken[]): { commands: CommandGroup[]; subshell
 	// Heredocs are not modeled, so a `<<` body is still scanned as script text
 	// and over-flags rather than under-flags.
 	let skipTarget = false;
+	let targetWrites = false;
 	for (const token of tokens) {
 		if (skipTarget) {
 			if (typeof token === "string" || token.op === "glob") {
+				if (targetWrites) redirects.push(tokenText(token));
 				skipTarget = false;
 				continue;
 			}
@@ -582,18 +666,25 @@ function commandsOf(tokens: ParsedToken[]): { commands: CommandGroup[]; subshell
 		}
 		if (typeof token === "string") {
 			words.push(token);
+			current += ` ${token}`;
 		} else if (token.op === "glob") {
 			globs.push(token.pattern ?? "");
+			current += ` ${token.pattern ?? ""}`;
 		} else if (CONTROL_OPS.has(token.op)) {
 			flush();
+			current = "";
+		} else if (token.op === "(" || token.op === ")") {
+			continue;
 		} else if (REDIRECT_OPS.has(token.op)) {
 			flush();
+			current = "";
 			skipTarget = true;
+			targetWrites = WRITE_REDIRECT_OPS.has(token.op);
 		}
 		// Comments are ignored.
 	}
 	flush();
-	return { commands, subshells };
+	return { commands, subshells, redirects };
 }
 
 function matchRules(group: CommandGroup, rules: readonly RiskyRule[], segment: string, matches: RiskyMatch[]): void {
@@ -634,11 +725,11 @@ function collectMatches(
 	for (const line of splitLines(script)) {
 		if (visited.has(line)) continue;
 		visited.add(line);
-		const { commands, subshells } = commandsOf(parseTokens(line));
+		const { commands, subshells, redirects } = commandsOf(parseTokens(line));
 		for (const group of commands) {
 			const words = normalizeCommand(group.words);
 			if (words.length > 0) {
-				matchRules({ words, globs: group.globs }, rules, line, matches);
+				matchRules({ words, globs: group.globs, segment: group.segment.trim() }, rules, group.segment.trim() || line, matches);
 				// Recurse into `bash -c <script>` / `eval <script>` wherever they
 				// appear (xargs, sudo, env prefixes normalize away first). Option
 				// clusters containing c (-lc, -ec, -xc) also carry the script.
@@ -658,6 +749,12 @@ function collectMatches(
 					}
 				}
 			}
+		}
+		// Truncating a database or raw device is destructive whatever the command
+		// word was, so redirect targets are judged on their own.
+		for (const target of redirects) {
+			if (!DESTRUCTIVE_REDIRECT_TARGET.test(target)) continue;
+			matches.push({ ruleId: REDIRECT_RULE.id, description: REDIRECT_RULE.description, segment: line.trim() });
 		}
 		for (const subshell of subshells) {
 			collectMatches(subshell, rules, matches, visited, depth + 1);

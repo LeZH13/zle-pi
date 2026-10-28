@@ -65,9 +65,10 @@ Contract for consumers:
 
 Every `bash` tool call is parsed and matched against a built-in table of risky patterns:
 
-- files: `rm` with `-r`/`-f`/unquoted globs, `find -delete`/`-exec rm`, `truncate`, `shred`, `dd`, `mkfs*`, `wipefs`, `chmod -R`/`chown -R`
-- git: `reset --hard`, force pushes (`--force`, `-f`, `+refspec`, `:branch` deletes), `clean -f` (dry runs pass), `checkout --`/`restore`, `branch -D`, `stash drop/clear`
-- data and infra: destructive SQL via `psql`/`mysql`/`sqlite3`, `terraform destroy`/`apply -auto-approve`, `kubectl delete`, `docker rm/rmi/volume rm/system prune`, `aws s3 rm --recursive`/`s3 rb`
+- files: `rm` with `-r`/`-f`/unquoted globs, `find -delete`/`-exec rm`, `truncate`, `shred`, `dd`, `mkfs*`, `wipefs`, `chmod -R`/`chown -R`, `rsync --delete`/`--remove-source-files`
+- redirects: a `>`/`>>` onto a database file or a raw device (`: > prod.db`), whatever the command was
+- git: `reset --hard`, force pushes (`--force`, `-f`, `+refspec`, `:branch` deletes), `clean -f` (dry runs pass), `checkout --`/`restore`, force `checkout -f`/`switch -f`, `branch -D`, `stash drop/clear`, `filter-branch`/`filter-repo`, `reflog expire`
+- data and infra: destructive SQL via `psql`/`mysql`/`sqlite3`, SQL script files (`psql -f`), `terraform destroy`/`apply -auto-approve`, `kubectl delete`, `docker rm/rmi/volume rm/system prune`, `compose down -v`, `helm uninstall`, `aws s3 rm --recursive`/`s3 rb`
 - publishing: `npm unpublish`, `gh repo delete`
 
 Matching sees through compound commands, redirects (`>`, `>>`, `2>&1`, `&>`, `<` - the target is not a command word), `$(...)`, backticks, `bash -c`/`sh -c`/`eval`, env assignments, wrappers (`sudo`, `env`, `xargs`, `timeout`, `nohup`, ...), git global options (`-C`, `-c`, ...), and shell control keywords. Quoted text is data: `echo "rm -rf /"` never matches.
