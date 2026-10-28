@@ -163,6 +163,45 @@ function validConfig(value: unknown): boolean {
 	return true;
 }
 
+/** Guard keys a project config may tune more strictly, but never more loosely. */
+const PROJECT_GUARD_KEYS = ["enabled", "approvalMode", "allowBelow", "allowPatterns"] as const;
+
+/**
+ * Drop guard keys a project config used to loosen the guard in its own
+ * directory. `<cwd>/.pi/bash-guard.json` arrives with the working tree, so it is
+ * exactly what the guard is meant to protect against: a repo must be able to
+ * tighten scrutiny for itself, never to switch the guard off or whitelist
+ * commands. Tightening is `extraRiskyPatterns`, a lower `allowBelow`, a stricter
+ * `approvalMode`, or `enabled: true`.
+ */
+export function restrictProjectConfig(
+	file: PartialConfig,
+	base: BashGuardConfig,
+): { override: PartialConfig; ignored: string[] } {
+	const section = file.guard;
+	if (!isPlainObject(section)) return { override: file, ignored: [] };
+	const guard: Record<string, unknown> = { ...section };
+	const ignored: string[] = [];
+	for (const key of PROJECT_GUARD_KEYS) {
+		if (!(key in guard)) continue;
+		const value = guard[key];
+		const looser =
+			key === "enabled" ? value === false
+			: key === "approvalMode" ? base.guard.approvalMode === "deny" && value === "ask"
+			: key === "allowBelow" ? typeof value === "number" && value > base.guard.allowBelow
+			: true; // allowPatterns only ever widen what runs unjudged.
+		if (looser) {
+			ignored.push(`guard.${key}`);
+			delete guard[key];
+		}
+	}
+	if (ignored.length === 0) return { override: file, ignored };
+	const override: PartialConfig = { ...file };
+	if (Object.keys(guard).length > 0) override.guard = guard;
+	else delete override.guard;
+	return { override, ignored };
+}
+
 /** Merge section objects; nested endpoint objects, scalars, and arrays are replaced. */
 export function mergeConfig(base: BashGuardConfig, override: PartialConfig): BashGuardConfig {
 	const merged: BashGuardConfig = {
@@ -224,6 +263,8 @@ export interface LoadConfigOptions {
 	readFile?: (path: string) => string | undefined;
 	/** Called when a file is invalid JSON or the merged config fails validation. */
 	onError?: (message: string) => void;
+	/** Called with the guard keys a project config asked to loosen and that were ignored. */
+	onIgnored?: (keys: readonly string[], path: string) => void;
 }
 
 /** Global config path, exported for the README and status output. */
@@ -243,6 +284,8 @@ export function loadConfig(options: LoadConfigOptions): { config: BashGuardConfi
 	const agentDir = options.agentDir ?? "";
 	const files: string[] = [];
 	let merged = structuredClone(DEFAULT_CONFIG);
+	/** The user-level endpoint, the only endpoint a project config may keep. */
+	let userEndpoint: BashGuardConfig["jev"]["endpoint"];
 
 	const userPath = userConfigPath(agentDir);
 	const userFile = readJsonFile(userPath, options.readFile, options.onError);
@@ -250,6 +293,7 @@ export function loadConfig(options: LoadConfigOptions): { config: BashGuardConfi
 		if (validConfig(userFile)) {
 			files.push(userPath);
 			merged = mergeConfig(merged, userFile);
+			userEndpoint = merged.jev.endpoint;
 		} else {
 			options.onError?.(`Invalid ${userPath}: ignoring invalid keys`);
 		}
@@ -258,11 +302,20 @@ export function loadConfig(options: LoadConfigOptions): { config: BashGuardConfi
 	const projectFile = readJsonFile(projectPath, options.readFile, options.onError);
 	if (projectFile) {
 		if (validConfig(projectFile)) {
+			const { override, ignored } = restrictProjectConfig(projectFile, merged);
+			if (ignored.length > 0) options.onIgnored?.(ignored, projectPath);
 			files.push(projectPath);
-			merged = mergeConfig(merged, projectFile);
+			merged = mergeConfig(merged, override);
 		} else {
 			options.onError?.(`Invalid ${projectPath}: ignoring invalid keys`);
 		}
+	}
+
+	// A project config may not repoint Jev at an endpoint of its own choosing:
+	// committing it would send this machine's commands and cwd to that host.
+	if (merged.jev.endpoint !== undefined && merged.jev.endpoint !== userEndpoint) {
+		options.onIgnored?.(["jev.endpoint"], projectPath);
+		merged.jev = { ...merged.jev, endpoint: userEndpoint };
 	}
 
 	// Individually valid files can combine a model pin and an endpoint. Reject

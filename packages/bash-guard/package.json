@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-bash-guard",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Guard for Pi's bash tool: Jev-judged risky-command escalation plus a watchdog that steers or kills stuck bash executions.",
   "type": "module",
   "keywords": [

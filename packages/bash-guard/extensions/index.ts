@@ -84,6 +84,8 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let ui: ExtensionUIContext | undefined;
 	let config: BashGuardConfig = structuredClone(DEFAULT_CONFIG);
 	let configFiles: string[] = [];
+	/** Guard keys a project config asked to loosen; shown so a weakened guard is never silent. */
+	let ignoredProjectKeys: { path: string; keys: readonly string[] } | undefined;
 	let sessionSettings: SessionSettings = {};
 	let launchApprovalMode: string | undefined;
 	let approvalMode: ApprovalMode = "ask";
@@ -388,7 +390,15 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		const onError = (message: string): void => {
 			if (ctx.hasUI) ctx.ui.notify(`bash-guard: ${message}`, "warning");
 		};
-		const loaded = loadConfig({ agentDir: getAgentDir(), projectDir: ctx.cwd, onError });
+		const loaded = loadConfig({
+			agentDir: getAgentDir(),
+			projectDir: ctx.cwd,
+			onError,
+			onIgnored: (keys, path) => {
+				ignoredProjectKeys = { path, keys };
+				onError(`${path} may only tighten the guard; ignored ${keys.join(", ")}`);
+			},
+		});
 		config = loaded.config;
 		configFiles = loaded.files;
 		risky = {
@@ -501,6 +511,9 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			`allowBelow ${config.guard.allowBelow}, session-allowed commands: ${allowedCommands.size}, allow patterns: ${config.guard.allowPatterns.length}, extra risky patterns: ${config.guard.extraRiskyPatterns.length}`,
 			`config: ${configFiles.length > 0 ? configFiles.join(", ") : "defaults (no bash-guard.json found)"}`,
 		];
+		if (ignoredProjectKeys) {
+			lines.push(`⚠ ${ignoredProjectKeys.path} ignored ${ignoredProjectKeys.keys.join(", ")} (project config may only tighten)`);
+		}
 		const usage = jev.usage();
 		if (usage.totalTokens > 0) {
 			lines.push(

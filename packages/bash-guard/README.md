@@ -10,6 +10,8 @@ pi install npm:@zle13/pi-bash-guard
 pi -e npm:@zle13/pi-bash-guard   # try once
 ```
 
+**0.5.0:** a project-level `<cwd>/.pi/bash-guard.json` may now only tighten the guard for its directory. Previously it could set `guard.enabled: false`, add `allowPatterns`, raise `allowBelow`, or repoint `jev.endpoint` - which let any cloned repo switch the guard off, whitelist commands, or send this machine's commands elsewhere. Those keys are now ignored with a warning; put them in `~/.pi/agent/bash-guard.json` instead.
+
 **0.4.1 fixes extension loading for managed installs on Pi 1.x.** Custom endpoints use Pi's exposed built-in provider API rather than a raw SDK subpath. Configuration and guard behavior are unchanged.
 
 ## Approval modes
@@ -193,6 +195,14 @@ Set defaults for new sessions in `~/.pi/agent/bash-guard.json`, overridden by `<
 ```
 
 `extraRiskyPatterns` and `allowPatterns` are regexes matched against the full command; allow wins over built-in rules, and invalid regexes are reported and skipped. `guard.approvalMode` is `"ask"` (confirm with the user) or `"deny"` (block all escalations); session selections override this default, the `PI_BASH_GUARD_APPROVAL_MODE` launch override wins over both, and a valid `deny` value also pins the guard on (see Approval modes). `jev.timeoutMs` defaults to 6000ms and applies per attempt. Leave `jev.model` unset for auto-detection and failover.
+
+### Project config may only tighten
+
+`<cwd>/.pi/bash-guard.json` arrives with the working tree, so it is treated as untrusted. It can make the guard stricter for its own directory, never weaker: `guard.enabled: false`, `guard.allowPatterns`, a `guard.allowBelow` above the inherited value, relaxing `approvalMode` from deny to ask, and `jev.endpoint` are ignored and reported where you will see them (a warning at session start, and in `/bash-guard`).
+
+Ignoring `jev.endpoint` also keeps a committed config from choosing where this machine's commands and cwd are sent. Set the endpoint in `~/.pi/agent/bash-guard.json` or through `jev.model`.
+
+Tightening is always honored: `extraRiskyPatterns`, a lower `allowBelow`, a stricter `approvalMode`, and `enabled: true`. Untrusted tuning that cannot loosen the guard (`watchdog`, `jev.timeoutMs`, model pins in your own config) is untouched.
 
 ### Custom Jev endpoint
 

@@ -21,7 +21,7 @@ import { BASH_GUARD_RUNTIME_SYMBOL, type BashGuardRuntime } from "../src/runtime
 import { ALLOW_ENTRY_TYPE, SETTINGS_ENTRY_TYPE } from "../src/state.js";
 import bashGuardExtension from "../extensions/index.js";
 
-const mocks = vi.hoisted(() => ({ shellCalls: [] as { command: string; cwd: string }[] }));
+const mocks = vi.hoisted(() => ({ shellCalls: [] as { command: string; cwd: string }[], agentDir: "/nonexistent-bash-guard-test-agent" }));
 const tempProjects: string[] = [];
 
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
@@ -29,7 +29,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
 	return {
 		...actual,
 		// Hermetic config lookup: never read the developer's ~/.pi/agent config.
-		getAgentDir: () => "/nonexistent-bash-guard-test-agent",
+		getAgentDir: () => mocks.agentDir,
 		// Recorded shell backend: the wrapper under test delegates to it, so a
 		// passing command proves wiring without spawning a real shell.
 		createLocalBashOperations: () => ({
@@ -105,10 +105,20 @@ function makeHarness(
 		jevP?: number;
 		branch?: unknown[];
 		branchThrows?: boolean;
+		/** Trusted, user-level config written to a temp agent dir. */
+		userConfig?: { guard?: Partial<GuardConfig>; watchdog?: Partial<WatchdogConfig>; jev?: Partial<JevConfig> };
+		/** Untrusted, project-level config written to `<cwd>/.pi/bash-guard.json`. */
 		config?: { guard?: Partial<GuardConfig>; watchdog?: Partial<WatchdogConfig>; jev?: Partial<JevConfig> };
 	} = {},
 ): Harness {
 	let cwd = "/proj";
+	let agentDir = "/nonexistent-bash-guard-test-agent";
+	if (options.userConfig) {
+		agentDir = mkdtempSync(join(tmpdir(), "bash-guard-agent-"));
+		tempProjects.push(agentDir);
+		writeFileSync(join(agentDir, "bash-guard.json"), JSON.stringify(options.userConfig));
+	}
+	mocks.agentDir = agentDir;
 	if (options.config) {
 		cwd = mkdtempSync(join(tmpdir(), "bash-guard-config-"));
 		tempProjects.push(cwd);
@@ -236,7 +246,7 @@ describe("Jev endpoint extension wiring", () => {
 		vi.stubGlobal("fetch", fetch);
 		const h = makeHarness({
 			jevP: 0.9,
-			config: { jev: { endpoint: { baseUrl: "https://private-endpoint.example/v1", apiKey: "$BG_EXTENSION_JEV_KEY", models: [`custom-${key}`] } } },
+			userConfig: { jev: { endpoint: { baseUrl: "https://private-endpoint.example/v1", apiKey: "$BG_EXTENSION_JEV_KEY", models: [`custom-${key}`] } } },
 		});
 		await h.sessionStart();
 		await expect(h.toolCall("rm -rf node_modules")).resolves.toBeUndefined();
@@ -253,13 +263,43 @@ describe("Jev endpoint extension wiring", () => {
 	it("falls back to registry authentication after the configured endpoint fails", async () => {
 		const fetch = vi.fn(async () => new Response(JSON.stringify({ error: { message: "upstream error" } }), { status: 503 }));
 		vi.stubGlobal("fetch", fetch);
-		const h = makeHarness({ jevP: 0.1, config: { jev: { endpoint: { baseUrl: "https://endpoint.example/v1", apiKey: "private-key" } } } });
+		const h = makeHarness({ jevP: 0.1, userConfig: { jev: { endpoint: { baseUrl: "https://endpoint.example/v1", apiKey: "private-key" } } } });
 		await h.sessionStart();
 		await expect(h.toolCall("rm -rf node_modules")).resolves.toBeUndefined();
 		expect(fetch).toHaveBeenCalledTimes(2);
 		expect(h.registry!.classify).toHaveBeenCalledOnce();
 		await h.command("");
 		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("jev: on - typesafe/jev-latest");
+		await h.shutdown();
+	});
+});
+
+
+describe("project config only tightens", () => {
+	it("ignores a repo's attempt to disable the guard and says so", async () => {
+		const h = makeHarness({ config: { guard: { enabled: false } } });
+		await h.sessionStart();
+		expect(runtime()!.guardEnabled).toBe(true);
+		expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("may only tighten the guard; ignored guard.enabled"), "warning");
+		await expect(h.toolCall("rm -rf /")).resolves.toMatchObject({ block: true });
+		await h.command("");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("ignored guard.enabled (project config may only tighten)");
+	});
+
+	it("ignores a repo's allow patterns, so a whitelisted command is still judged", async () => {
+		const h = makeHarness({ jevP: 0.9, config: { guard: { allowPatterns: ["npm run build"] } } });
+		await h.sessionStart();
+		await h.command("");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("ignored guard.allowPatterns");
+		await expect(h.toolCall("npm run build && rm -rf ~")).resolves.toMatchObject({ block: true });
+	});
+
+	it("keeps tightening from the repo without a warning", async () => {
+		const h = makeHarness({ jevP: 0.1, config: { guard: { allowBelow: 0.05, extraRiskyPatterns: ["^helm uninstall"] } } });
+		await h.sessionStart();
+		expect(h.ui.notify.mock.calls.flat().join(" ")).not.toContain("may only tighten");
+		await h.command("");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("allowBelow 0.05");
 		await h.shutdown();
 	});
 });
@@ -612,7 +652,7 @@ describe("session settings commands", () => {
 	});
 
 	it("reports config-disabled components instead of claiming activation", async () => {
-		const h = makeHarness({ config: { guard: { enabled: false }, watchdog: { enabled: false } } });
+		const h = makeHarness({ userConfig: { guard: { enabled: false }, watchdog: { enabled: false } } });
 		await h.sessionStart();
 		await h.command("ask");
 		expect(runtime()!.guardEnabled).toBe(false);

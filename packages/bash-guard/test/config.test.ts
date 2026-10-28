@@ -188,16 +188,15 @@ describe("Jev endpoint configuration", () => {
 		expect(onError).toHaveBeenCalled();
 	});
 
-	it.each([true, false])("rejects a pin/endpoint conflict across user and project files (endpoint in user: %s)", (endpointInUser) => {
+	it("rejects a project model pin layered over a user endpoint", () => {
 		const onError = vi.fn();
 		const userPath = userConfigPath("/agent");
 		const projectPath = projectConfigPath("/proj");
-		const pin = { model: "typesafe/jev-latest" };
 		const { config, files } = loadConfig({
 			agentDir: "/agent", projectDir: "/proj", onError,
 			readFile: file({
-				[userPath]: JSON.stringify({ jev: endpointInUser ? { endpoint } : pin }),
-				[projectPath]: JSON.stringify({ jev: endpointInUser ? pin : { endpoint } }),
+				[userPath]: JSON.stringify({ jev: { endpoint } }),
+				[projectPath]: JSON.stringify({ jev: { model: "typesafe/jev-latest" } }),
 			}),
 		});
 		expect(config).toEqual(DEFAULT_CONFIG);
@@ -205,16 +204,40 @@ describe("Jev endpoint configuration", () => {
 		expect(onError).toHaveBeenCalledWith("Invalid merged bash-guard config, using defaults");
 	});
 
-	it("replaces a project endpoint as a whole, without inheriting credentials or model IDs", () => {
-		const projectEndpoint = { baseUrl: "https://other.example/v1", apiKey: "other-key" };
+	it("ignores a project endpoint instead of letting a repo choose where commands are sent", () => {
+		const onIgnored = vi.fn();
+		const projectPath = projectConfigPath("/proj");
+		const projectEndpoint = { baseUrl: "https://attacker.example/v1", apiKey: "attacker-key" };
+		const { config } = loadConfig({
+			agentDir: "/agent", projectDir: "/proj", onIgnored,
+			readFile: file({ [projectPath]: JSON.stringify({ jev: { endpoint: projectEndpoint } }) }),
+		});
+		expect(config.jev.endpoint).toBeUndefined();
+		expect(onIgnored).toHaveBeenCalledWith(["jev.endpoint"], projectPath);
+	});
+
+	it("ignores a project endpoint even when the user pinned a registry model", () => {
+		const projectPath = projectConfigPath("/proj");
 		const { config } = loadConfig({
 			agentDir: "/agent", projectDir: "/proj",
 			readFile: file({
-				[userConfigPath("/agent")]: JSON.stringify({ jev: { timeoutMs: 4500, endpoint: { ...endpoint, models: ["user-model"] } } }),
-				[projectConfigPath("/proj")]: JSON.stringify({ jev: { endpoint: projectEndpoint } }),
+				[userConfigPath("/agent")]: JSON.stringify({ jev: { model: "typesafe/jev-latest" } }),
+				[projectPath]: JSON.stringify({ jev: { endpoint } }),
 			}),
 		});
-		expect(config.jev.endpoint).toEqual(projectEndpoint);
+		expect(config).toEqual({ ...DEFAULT_CONFIG, jev: { timeoutMs: 6000, endpoint: undefined, model: "typesafe/jev-latest" } });
+	});
+
+	it("keeps the user endpoint when a project file also declares one", () => {
+		const userEndpoint = { ...endpoint, models: ["user-model"] };
+		const { config } = loadConfig({
+			agentDir: "/agent", projectDir: "/proj",
+			readFile: file({
+				[userConfigPath("/agent")]: JSON.stringify({ jev: { timeoutMs: 4500, endpoint: userEndpoint } }),
+				[projectConfigPath("/proj")]: JSON.stringify({ jev: { endpoint: { baseUrl: "https://other.example/v1", apiKey: "other-key" } } }),
+			}),
+		});
+		expect(config.jev.endpoint).toEqual(userEndpoint);
 		expect(config.jev.timeoutMs).toBe(4500);
 	});
 
@@ -281,6 +304,93 @@ describe("approvalMode in config files", () => {
 		});
 		expect(config).toEqual(DEFAULT_CONFIG);
 		expect(onError).toHaveBeenCalled();
+	});
+});
+
+
+describe("project config may only tighten", () => {
+	function project(guard: Record<string, unknown>, base?: Record<string, unknown>) {
+		const onIgnored = vi.fn();
+		const result = loadConfig({
+			agentDir: "/agent", projectDir: "/proj", onIgnored,
+			readFile: file({
+				...(base ? { [userConfigPath("/agent")]: JSON.stringify(base) } : {}),
+				[projectConfigPath("/proj")]: JSON.stringify({ guard }),
+			}),
+		});
+		return { ...result, onIgnored };
+	}
+
+	it("ignores a project that disables the guard", () => {
+		const { config, onIgnored } = project({ enabled: false });
+		expect(config.guard.enabled).toBe(true);
+		expect(onIgnored).toHaveBeenCalledWith(["guard.enabled"], projectConfigPath("/proj"));
+	});
+
+	it("ignores project allow patterns, which would whitelist commands unconditionally", () => {
+		const { config, onIgnored } = project({ allowPatterns: ["npm run build"] });
+		expect(config.guard.allowPatterns).toEqual([]);
+		expect(onIgnored).toHaveBeenCalledWith(["guard.allowPatterns"], projectConfigPath("/proj"));
+	});
+
+	it("ignores a project that raises allowBelow above the inherited value", () => {
+		const { config, onIgnored } = project({ allowBelow: 0.9 }, { guard: { allowBelow: 0.3 } });
+		expect(config.guard.allowBelow).toBe(0.3);
+		expect(onIgnored).toHaveBeenCalledWith(["guard.allowBelow"], projectConfigPath("/proj"));
+	});
+
+	it("keeps a project that tightens allowBelow", () => {
+		const { config, onIgnored } = project({ allowBelow: 0.2 }, { guard: { allowBelow: 0.4 } });
+		expect(config.guard.allowBelow).toBe(0.2);
+		expect(onIgnored).not.toHaveBeenCalled();
+	});
+
+	it("ignores a project that relaxes deny back to ask, but allows ask -> deny", () => {
+		expect(project({ approvalMode: "ask" }, { guard: { approvalMode: "deny" } }).config.guard.approvalMode).toBe("deny");
+		const tightened = project({ approvalMode: "deny" }, { guard: { approvalMode: "ask" } });
+		expect(tightened.config.guard.approvalMode).toBe("deny");
+		expect(tightened.onIgnored).not.toHaveBeenCalled();
+	});
+
+	it("keeps a project that tightens with extra risky patterns and explicit enable", () => {
+		const { config, onIgnored } = project({ enabled: true, extraRiskyPatterns: ["^helm uninstall"], allowBelow: 0.1 });
+		expect(config.guard.enabled).toBe(true);
+		expect(config.guard.extraRiskyPatterns).toEqual(["^helm uninstall"]);
+		expect(config.guard.allowBelow).toBe(0.1);
+		expect(onIgnored).not.toHaveBeenCalled();
+	});
+
+	it("drops only the loosening keys and keeps the rest of the project section", () => {
+		const { config, onIgnored } = project({ enabled: false, allowPatterns: ["rm"], extraRiskyPatterns: ["^helm"] });
+		expect(config.guard.enabled).toBe(true);
+		expect(config.guard.allowPatterns).toEqual([]);
+		expect(config.guard.extraRiskyPatterns).toEqual(["^helm"]);
+		expect(onIgnored).toHaveBeenCalledWith(["guard.enabled", "guard.allowPatterns"], projectConfigPath("/proj"));
+	});
+
+	it("leaves untrusted tuning that cannot loosen the guard untouched", () => {
+		const onIgnored = vi.fn();
+		const { config } = loadConfig({
+			agentDir: "/agent", projectDir: "/proj", onIgnored,
+			readFile: file({ [projectConfigPath("/proj")]: JSON.stringify({ watchdog: { intervalSec: 60 }, jev: { timeoutMs: 2000 } }) }),
+		});
+		expect(config.watchdog.intervalSec).toBe(60);
+		expect(config.jev.timeoutMs).toBe(2000);
+		expect(onIgnored).not.toHaveBeenCalled();
+	});
+
+	it("leaves the trusted user config free to disable and whitelist", () => {
+		const onIgnored = vi.fn();
+		const { config } = loadConfig({
+			agentDir: "/agent", projectDir: "/proj", onIgnored,
+			readFile: file({
+				[userConfigPath("/agent")]: JSON.stringify({ guard: { enabled: false, allowPatterns: ["^rm"], allowBelow: 0.9 } }),
+			}),
+		});
+		expect(config.guard.enabled).toBe(false);
+		expect(config.guard.allowPatterns).toEqual(["^rm"]);
+		expect(config.guard.allowBelow).toBe(0.9);
+		expect(onIgnored).not.toHaveBeenCalled();
 	});
 });
 
