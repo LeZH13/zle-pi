@@ -85,7 +85,7 @@ Then:
 
 Allowed commands Jev judged get a dim line under them in the transcript, e.g. `⛨ bash-guard: jev p=0.31 recoverable` or `jev p=0.60 allowed by user`. Blocked commands carry the score in their block reason.
 
-Only bash's call rendering is decorated; result rendering and other tools' renderers remain unchanged, including their collapse behavior.
+Bash's transcript timer starts at actual execution, excluding Jev checks, permission dialogs, and parallel preflight waits. Blocked commands show no execution timer. This also works with the watchdog disabled. The guard registers Pi's local bash tool whenever either component is enabled; if another extension owns bash, its execution timing is left unchanged. Result formatting, collapse behavior, and other tools' renderers are preserved.
 
 Without a Jev classifier the guard runs **rules-only**: every risky command escalates, and a one-time notice says how to enable Jev.
 

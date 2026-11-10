@@ -11,7 +11,10 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	ToolCallEventResult,
+	ToolRenderers,
+	ToolRendererResolver,
 } from "@earendil-works/pi-coding-agent";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -95,6 +98,8 @@ interface Harness {
 	toolCall(command: string, toolCallId?: string): Promise<ToolCallEventResult | undefined>;
 	command(args: string): Promise<void>;
 	registeredBashTool(): BashExecute | undefined;
+	bashRenderers(decorate?: (base: ToolRenderers) => ToolRenderers): ToolRenderers;
+	toolEnd(toolCallId: string): Promise<void>;
 	registry: Registry | undefined;
 }
 
@@ -130,7 +135,8 @@ function makeHarness(
 	const flags = new Map<string, boolean | string>([["no-bash-guard", options.flag ?? false]]);
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, (args: string, ctx: ExtensionCommandContext) => Promise<void>>();
-	const tools: { name: string; definition: { name: string; execute: BashExecute } }[] = [];
+	const tools: { name: string; definition: { name: string; execute: BashExecute } & ToolRenderers }[] = [];
+	let rendererResolver: ToolRendererResolver;
 	const entries: { type: string; data: unknown }[] = [];
 	const ui = {
 		notify: vi.fn(),
@@ -146,8 +152,8 @@ function makeHarness(
 			if (!flags.has(name)) flags.set(name, config.default ?? false);
 		},
 		getFlag: (name: string) => flags.get(name),
-		registerTool: (definition: { name: string; execute: BashExecute }) => tools.push({ name: definition.name, definition }),
-		registerToolRenderer: vi.fn(),
+		registerTool: (definition: { name: string; execute: BashExecute } & ToolRenderers) => tools.push({ name: definition.name, definition }),
+		registerToolRenderer: (resolver: ToolRendererResolver) => { rendererResolver = resolver; },
 		registerCommand: (name: string, config: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>; getArgumentCompletions?: (prefix: string) => unknown }) => {
 			commands.set(name, config.handler);
 			complete = config.getArgumentCompletions;
@@ -222,6 +228,13 @@ function makeHarness(
 			await handler(args, makeCtx() as unknown as ExtensionCommandContext);
 		},
 		registeredBashTool: () => tools.find((tool) => tool.name === "bash")?.definition.execute,
+		bashRenderers: (decorate) => rendererResolver("bash", () => {
+			const base = tools.find((tool) => tool.name === "bash")!.definition;
+			return decorate ? decorate(base) : base;
+		})!,
+		toolEnd: async (toolCallId) => {
+			await first("tool_execution_end")({ type: "tool_execution_end", toolCallId }, makeCtx());
+		},
 	};
 }
 
@@ -234,6 +247,7 @@ beforeEach(() => {
 afterEach(() => {
 	vi.unstubAllEnvs();
 	vi.unstubAllGlobals();
+	vi.useRealTimers();
 	delete globalSymbols()[BASH_GUARD_RUNTIME_SYMBOL];
 	for (const path of tempProjects.splice(0)) rmSync(path, { recursive: true, force: true });
 });
@@ -680,6 +694,92 @@ describe("session settings commands", () => {
 		expect(runtime()!.approvalMode).toBe("deny");
 		expect(h.ui.notify).not.toHaveBeenCalled();
 		expect(await h.toolCall("git push --force origin main")).toMatchObject({ block: true });
+	});
+});
+
+describe("bash execution timer", () => {
+	function row(h: Harness, toolCallId = "call-1") {
+		let durationMs: number | undefined;
+		const renderers = h.bashRenderers((base) => ({
+			...base,
+			renderResult: (result, options, theme, context) => {
+				durationMs = (context as typeof context & { durationMs?: number }).durationMs;
+				return base.renderResult!(result, options, theme, context);
+			},
+		}));
+		const args = { command: "git push --force origin main" };
+		const context: Parameters<NonNullable<ToolRenderers["renderCall"]>>[2] = {
+			args, toolCallId, state: {}, executionStarted: true,
+			argsComplete: true, isPartial: true, expanded: false,
+			showImages: false, isError: false, cwd: "/proj",
+			lastComponent: undefined, invalidate: vi.fn(),
+		};
+		// Pi 1.5 supplies lifecycle duration, which includes approval waits.
+		Object.assign(context, { durationMs: 42_000 });
+		return {
+			durationMs: () => durationMs,
+			draw(partial = true) {
+				const theme = { fg: (_kind: string, text: string) => text } as Parameters<NonNullable<ToolRenderers["renderCall"]>>[1];
+				renderers.renderCall!(args, theme, context);
+				return renderers.renderResult!({ content: [], details: undefined },
+					{ isPartial: partial, expanded: false }, theme, context).render(120).join("\n");
+			},
+		};
+	}
+
+	it.each([true, false])("excludes approval waits with watchdog enabled=%s", async (enabled) => {
+		vi.useFakeTimers();
+		vi.setSystemTime(100_000);
+		initTheme("dark");
+		const h = makeHarness({ jevP: 0.9, userConfig: { watchdog: { enabled } } });
+		await h.sessionStart();
+		const commandRow = row(h);
+		const siblingRow = row(h, "sibling");
+		expect(commandRow.draw()).not.toContain("Elapsed");
+		expect(commandRow.durationMs()).toBeUndefined();
+		let approve!: (choice: string) => void;
+		h.ui.select.mockImplementationOnce(() => new Promise<string>((resolve) => { approve = resolve; }));
+		const approval = h.toolCall("git push --force origin main");
+		await vi.waitFor(() => expect(h.ui.select).toHaveBeenCalled());
+		vi.setSystemTime(130_000);
+		expect(commandRow.draw()).not.toContain("Elapsed");
+		approve("Allow once");
+		await approval;
+		// Approval alone isn't execution (parallel siblings can still be in preflight).
+		expect(commandRow.draw()).not.toContain("Elapsed");
+		vi.setSystemTime(140_000);
+		let updates = 0;
+		await h.registeredBashTool()!("call-1", { command: "git push --force origin main" },
+			undefined, () => {
+				expect(commandRow.draw()).toContain(`Elapsed ${updates === 0 ? "0.0" : "2.0"}s`);
+				expect(siblingRow.draw()).not.toContain("Elapsed");
+				if (updates++ === 0) vi.advanceTimersByTime(2000);
+			}, {
+				cwd: "/proj",
+				sessionManager: { getSessionId: () => "s", getSessionFile: () => undefined },
+			} as unknown as ExtensionContext);
+		vi.setSystemTime(142_000);
+		expect(commandRow.draw(false)).toContain("Took 2.0s");
+		expect(commandRow.durationMs()).toBe(2000);
+		await h.toolEnd("call-1");
+		vi.setSystemTime(150_000);
+		expect(commandRow.draw(false)).toContain("Took 2.0s");
+		await h.shutdown();
+	});
+
+	it("does not display execution time for a blocked command", async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(100_000);
+		initTheme("dark");
+		const h = makeHarness({ jevP: 0.9 });
+		await h.sessionStart();
+		const commandRow = row(h);
+		expect(commandRow.draw()).not.toContain("Elapsed");
+		vi.setSystemTime(130_000);
+		expect(await h.toolCall("git push --force origin main")).toMatchObject({ block: true });
+		expect(commandRow.draw(false)).not.toContain("Took");
+		await h.toolEnd("call-1");
+		await h.shutdown();
 	});
 });
 

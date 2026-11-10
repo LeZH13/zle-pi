@@ -26,6 +26,7 @@ import type {
 	ModelRegistry,
 	ToolCallEventResult,
 	ToolResultEventResult,
+	ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
 import {
 	createBashToolDefinition,
@@ -109,6 +110,32 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let tally: GuardTally = { passed: 0, asked: 0, blocked: 0 };
 	let statusTick: ReturnType<typeof setInterval> | undefined;
 	let runtimeReady = false;
+	// Pi announces tool_execution_start before approval. Only our execute
+	// wrapper marks a call as actually running; renderer state survives map cleanup.
+	type ExecutionTiming = { started: boolean; durationMs?: number };
+	const executions = new Map<string, ExecutionTiming>();
+	const renderExecutions = new WeakMap<object, ExecutionTiming>();
+
+	function executionState(toolCallId: string): ExecutionTiming {
+		let state = executions.get(toolCallId);
+		if (!state) {
+			state = { started: false };
+			executions.set(toolCallId, state);
+		}
+		return state;
+	}
+
+	function executionContext(context: Parameters<NonNullable<ToolRenderers["renderCall"]>>[2]) {
+		if (!bashRegistered || bashConflict || !context.executionStarted) return context;
+		let state = renderExecutions.get(context.state);
+		if (!state) {
+			state = executionState(context.toolCallId);
+			renderExecutions.set(context.state, state);
+		}
+		// Newer Pi renderers prefer durationMs for final results. Its lifecycle
+		// duration includes approval, so replace it with our execution-only value.
+		return { ...context, executionStarted: state.started, durationMs: state.durationMs };
+	}
 
 	const flagDisabled = (): boolean => pi.getFlag(FLAG_NAME) === true;
 	// Enforced launch policy: a valid env deny pins the guard on, and an invalid
@@ -136,9 +163,9 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	}
 
 	function syncWatchdog(ctx: ExtensionContext): void {
+		ensureBashOverride(ctx.cwd);
+		bashConflict = detectBashConflict();
 		if (watchdogOn()) {
-			ensureBashOverride(ctx.cwd);
-			bashConflict = detectBashConflict();
 		} else {
 			watchdog?.dispose();
 			stopStatusTick();
@@ -218,7 +245,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	}
 
 	function ensureBashOverride(cwd: string): void {
-		if (bashRegistered || !watchdogOn()) return;
+		if (bashRegistered || (!guardOn() && !watchdogOn())) return;
 		const inner = createLocalBashOperations();
 		const operations: BashOperations = {
 			exec: async (command, execCwd, options) => {
@@ -255,7 +282,20 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				}
 			},
 		};
-		pi.registerTool(createBashToolDefinition(cwd, { operations }));
+		const bash = createBashToolDefinition(cwd, { operations });
+		pi.registerTool({
+			...bash,
+			execute: async (toolCallId, ...args) => {
+				const timing = executionState(toolCallId);
+				timing.started = true;
+				const startedAt = performance.now();
+				try {
+					return await bash.execute(toolCallId, ...args);
+				} finally {
+					timing.durationMs = performance.now() - startedAt;
+				}
+			},
+		});
 		bashRegistered = true;
 	}
 
@@ -336,7 +376,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		return {
 			...base,
 			renderCall: (args, theme, context) => {
-				const component = baseRenderCall(args, theme, { ...context, lastComponent: undefined });
+				const component = baseRenderCall(args, theme, { ...executionContext(context), lastComponent: undefined });
 				const label = guardScores.get(context.toolCallId);
 				if (label === undefined) return component;
 				const container = new Container();
@@ -344,6 +384,9 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				container.addChild(new Text(theme.fg("muted", `⛨ bash-guard: ${label}`), 0, 0));
 				return container;
 			},
+			renderResult: base.renderResult
+				? (result, options, theme, context) => base.renderResult!(result, options, theme, executionContext(context))
+				: undefined,
 		};
 	});
 
@@ -367,6 +410,10 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		}
 		if (ctx.hasUI) ctx.ui.notify(outcome.reason, "error");
 		return { block: true, reason: outcome.reason };
+	});
+
+	pi.on("tool_execution_end", (event) => {
+		executions.delete(event.toolCallId);
 	});
 
 	// Attach the per-check watchdog log to bash tool result details (UI-only;
@@ -423,6 +470,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		}
 		jevOffNotified = false;
 		guardScores = new Map();
+		executions.clear();
 		bashConflict = false;
 		tally = { passed: 0, asked: 0, blocked: 0 };
 
@@ -448,9 +496,9 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			notify: (message, type) => notifySafe(message, type),
 		});
 
+		ensureBashOverride(ctx.cwd);
+		bashConflict = detectBashConflict();
 		if (watchdogOn()) {
-			ensureBashOverride(ctx.cwd);
-			bashConflict = detectBashConflict();
 			if (bashConflict) {
 				notifySafe(
 					"bash-guard: another extension already overrides the bash tool, so the watchdog cannot watch commands. The guard still runs.",
@@ -475,6 +523,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => {
 		stopStatusTick();
 		watchdog?.dispose();
+		executions.clear();
 		currentRegistry = undefined;
 		runtimeReady = false;
 		runtime.clear();

@@ -33,12 +33,16 @@ describe("bash-guard renderer delegation", () => {
 		expect(next).toHaveBeenCalledOnce();
 	});
 
-	it("decorates only bash calls and preserves its result renderer", () => {
+	it("decorates bash calls and delegates result formatting", () => {
 		const base = { renderCall: vi.fn(), renderResult: vi.fn() };
 		const next = vi.fn(() => base);
 		const result = getResolver()("bash", next);
 		expect(next).toHaveBeenCalledOnce();
 		expect(result?.renderCall).not.toBe(base.renderCall);
-		expect(result?.renderResult).toBe(base.renderResult);
+		const rendered = {};
+		base.renderResult.mockReturnValue(rendered);
+		const context = { executionStarted: false } as never;
+		expect(result?.renderResult?.({ content: [], details: undefined }, { expanded: false, isPartial: false }, undefined as never, context)).toBe(rendered);
+		expect(base.renderResult).toHaveBeenCalledWith({ content: [], details: undefined }, { expanded: false, isPartial: false }, undefined, context);
 	});
 });
