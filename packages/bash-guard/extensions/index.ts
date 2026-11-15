@@ -56,7 +56,7 @@ import { createJev, type Jev } from "../src/jev.js";
 import { RISKY_RULES, compilePatterns, type RiskyScan } from "../src/rules.js";
 import { publishRuntimeMarker, readPackageVersion } from "../src/runtime.js";
 import { ALLOW_ENTRY_TYPE, restoreState, SETTINGS_ENTRY_TYPE, type GuardMode, type SessionSettings } from "../src/state.js";
-import { renderStatus, type GuardTally, type StatusStyler } from "../src/status.js";
+import { renderStatus, type GuardTally, type StatusStyler, formatElapsed } from "../src/status.js";
 import { activeCount, isActive, renderJobLine, renderWidgetLine, type JobStyler } from "../src/render.js";
 import { Watchdog, type WatchCheckRecord } from "../src/watchdog.js";
 
@@ -819,6 +819,50 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				: `${check.status} p=${check.probabilities?.[check.status]?.toFixed(2)} persistent=${check.persistent?.toFixed(2)} ${check.outcome}`;
 		return `[${check.elapsedSeconds}s ${verdict}]`;
 	}
+
+	// --- operator controls -----------------------------------------------------
+
+	/**
+	 * Stop a job from the keyboard. The model has `bash_jobs`, but ending your own
+	 * runaway command should not require spending a turn.
+	 */
+	async function cancelInteractively(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
+		const active = backgroundJobs().filter((job) => job.state === "running" || job.state === "cancelling");
+		if (active.length === 0) {
+			notifySafe("bash-guard: no background jobs are running", "info");
+			return;
+		}
+		if (!ctx.hasUI) {
+			notifySafe(`bash-guard: ${active.length} background job(s) running; use bash_jobs to cancel`, "warning");
+			return;
+		}
+		const label = (job: JobSnapshot): string =>
+			`${formatElapsed(job.wall_time_seconds).padStart(6)}  ${job.state.padEnd(10)}  ${job.command.replace(/\s+/g, " ").slice(0, 60)}`;
+		let target: JobSnapshot | undefined;
+		if (active.length === 1) {
+			const [only] = active;
+			target = await ctx.ui.confirm("Cancel background job?", label(only!)) ? only : undefined;
+		} else {
+			const chosen = await ctx.ui.select("Cancel which background job?", active.map(label));
+			target = active.find((job) => label(job) === chosen);
+		}
+		if (!target) return;
+		const [cancelled] = background.cancel(target.job_id);
+		notifySafe(`bash-guard: cancelling ${cancelled!.job_id}`, "info");
+	}
+
+	pi.registerShortcut("ctrl+shift+k", {
+		description: "Cancel a running background bash job",
+		handler: (ctx) => cancelInteractively(ctx),
+	});
+
+	pi.registerCommand("bash-jobs", {
+		description: "List background bash jobs and cancel one",
+		handler: (args, ctx) => {
+			void args;
+			return cancelInteractively(ctx);
+		},
+	});
 
 	pi.registerCommand(COMMAND_NAME, {
 		description: "Show bash-guard status, set ask/deny/off, or toggle the watchdog",

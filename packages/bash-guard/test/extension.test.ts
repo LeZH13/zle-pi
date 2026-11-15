@@ -135,6 +135,7 @@ function makeHarness(
 	const flags = new Map<string, boolean | string>([["no-bash-guard", options.flag ?? false]]);
 	const handlers = new Map<string, Handler[]>();
 	const commands = new Map<string, (args: string, ctx: ExtensionCommandContext) => Promise<void>>();
+	const shortcuts = new Map<string, () => void>();
 	const tools: { name: string; definition: { name: string; execute: BashExecute } & ToolRenderers }[] = [];
 	let rendererResolver: ToolRendererResolver;
 	const entries: { type: string; data: unknown }[] = [];
@@ -157,6 +158,9 @@ function makeHarness(
 		registerCommand: (name: string, config: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>; getArgumentCompletions?: (prefix: string) => unknown }) => {
 			commands.set(name, config.handler);
 			complete = config.getArgumentCompletions;
+		},
+		registerShortcut: (shortcut: string, config: { handler: () => void }) => {
+			shortcuts.set(shortcut, config.handler);
 		},
 		on: (type: string, handler: Handler) => {
 			handlers.set(type, [...(handlers.get(type) ?? []), handler]);

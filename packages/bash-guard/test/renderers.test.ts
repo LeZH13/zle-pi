@@ -10,6 +10,7 @@ function getResolver(): Resolver {
 		registerFlag: vi.fn(),
 		registerTool: vi.fn(),
 		registerToolRenderer: (value: Resolver) => { resolver = value; },
+		registerShortcut: vi.fn(),
 		on: vi.fn(),
 		registerCommand: vi.fn(),
 	} as unknown as ExtensionAPI;

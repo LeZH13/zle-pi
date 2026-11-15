@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition, ToolRendererResolver } from "@earendil-works/pi-coding-agent";
 import bashGuard from "../extensions/index.js";
@@ -19,10 +19,14 @@ const theme = { fg: (_kind: string, text: string) => text };
 function fakeUi() {
 	const widgets = new Map<string, (tui: unknown, theme: unknown) => { render(width: number): string[] }>();
 	const renders = { count: 0 };
+	const confirms: unknown[][] = [];
+	const state = { confirmAnswer: true, selectAnswer: undefined as string | undefined };
 	const tui = { requestRender: () => { renders.count++; } };
 	const statuses: string[] = [];
 	const ui = {
 		theme,
+		confirm: async (...args: unknown[]) => { confirms.push(args); return state.confirmAnswer; },
+		select: async () => state.selectAnswer,
 		setStatus: (_key: string, value: string | undefined) => { if (value) statuses.push(value); },
 		setWidget: (key: string, content: unknown) => {
 			if (content === undefined) widgets.delete(key);
@@ -30,7 +34,7 @@ function fakeUi() {
 		},
 		notify: vi.fn(),
 	};
-	return { ui, widgets, renders, tui, statuses };
+	return { ui, widgets, renders, tui, statuses, confirms, state };
 }
 
 async function harness(options: { after?: string; animation?: string; ui?: boolean } = {}) {
@@ -49,12 +53,15 @@ async function harness(options: { after?: string; animation?: string; ui?: boole
 	const handlers = new Map<string, Handler[]>();
 	let resolver: ToolRendererResolver | undefined;
 	const fake = fakeUi();
+	const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
+	const shortcuts = new Map<string, (ctx: ExtensionContext) => Promise<void>>();
 	const pi = {
 		registerFlag: (name: string, config: { default: unknown }) => { if (!flags.has(name)) flags.set(name, config.default); },
 		getFlag: (name: string) => flags.get(name),
 		registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
 		registerToolRenderer: (value: ToolRendererResolver) => { resolver = value; },
-		registerCommand: vi.fn(),
+		registerCommand: (name: string, config: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => { commands.set(name, config.handler); },
+		registerShortcut: (shortcut: string, config: { handler: (ctx: ExtensionContext) => Promise<void> }) => { shortcuts.set(shortcut, config.handler); },
 		on: (name: string, handler: Handler) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
 		getAllTools: () => [...tools.values()].map((tool) => ({ name: tool.name, sourceInfo: { path: "/pi-bash-guard/extensions/index.ts" } })),
 		sendMessage: vi.fn(), sendUserMessage: vi.fn(),
@@ -90,7 +97,7 @@ async function harness(options: { after?: string; animation?: string; ui?: boole
 		) as { render(width: number): string[] };
 		return { component, invalidate, lines: () => component.render(200).map((line) => line.trim()).filter(Boolean) };
 	}
-	return { call, emit, fake, renderBlock, tools, resolver: () => resolver! };
+	return { call, emit, fake, renderBlock, tools, ctx, commands, shortcuts, resolver: () => resolver! };
 }
 
 
@@ -190,4 +197,58 @@ it("renders no widget outside a TUI", async () => {
 	const status = await h.call("bash_jobs", { action: "status", job_id: (ack.structuredContent as { job_id: string }).job_id });
 	expect((status.structuredContent as { jobs: { state: string }[] }).jobs[0]!.state).toBe("running");
 	await h.call("bash_jobs", { action: "cancel", job_id: (ack.structuredContent as { job_id: string }).job_id });
+});
+
+describe("operator cancellation", () => {
+	it("cancels a single running job from the keyboard after confirmation", async () => {
+		const h = await harness();
+		const ack = await h.call("bash", { command: idle, background: true });
+		const jobId = (ack.structuredContent as { job_id: string }).job_id;
+		const shortcut = h.shortcuts.get("ctrl+shift+k");
+		expect(shortcut).toBeDefined();
+		await shortcut!(h.ctx);
+		expect(h.fake.confirms).toHaveLength(1);
+		expect(h.fake.confirms[0]![0]).toContain("Cancel background job?");
+		await vi.waitFor(() => {
+			expect(h.call("bash_jobs", { action: "status", job_id: jobId })).resolves.toMatchObject({ structuredContent: { jobs: [{ state: expect.stringMatching(/cancel/) }] } });
+		});
+	});
+
+	it("leaves the job running when the confirmation is declined", async () => {
+		const h = await harness();
+		const ack = await h.call("bash", { command: idle, background: true });
+		const jobId = (ack.structuredContent as { job_id: string }).job_id;
+		h.fake.state.confirmAnswer = false;
+		await h.commands.get("bash-jobs")!("", h.ctx);
+		const status = await h.call("bash_jobs", { action: "status", job_id: jobId });
+		expect((status.structuredContent as { jobs: { state: string }[] }).jobs[0]!.state).toBe("running");
+		await h.call("bash_jobs", { action: "cancel", job_id: jobId });
+	});
+
+	it("offers a picker when several jobs run and cancels the chosen one", async () => {
+		const h = await harness();
+		const first = await h.call("bash", { command: idle, background: true });
+		const second = await h.call("bash", { command: "sleep 60", background: true });
+		const firstId = (first.structuredContent as { job_id: string }).job_id;
+		const secondId = (second.structuredContent as { job_id: string }).job_id;
+		let offered: string[] = [];
+		(h.fake.ui as { select: unknown }).select = async (_title: string, options: string[]) => {
+			offered = options;
+			return options.find((option) => option.includes("sleep 60"));
+		};
+		await h.commands.get("bash-jobs")!("", h.ctx);
+		expect(offered).toHaveLength(2);
+		expect(h.fake.confirms).toHaveLength(0);
+		const secondState = await h.call("bash_jobs", { action: "status", job_id: secondId });
+		expect((secondState.structuredContent as { jobs: { state: string }[] }).jobs[0]!.state).toMatch(/cancel/);
+		const firstState = await h.call("bash_jobs", { action: "status", job_id: firstId });
+		expect((firstState.structuredContent as { jobs: { state: string }[] }).jobs[0]!.state).toBe("running");
+		await h.call("bash_jobs", { action: "cancel", job_id: firstId });
+	});
+
+	it("reports when nothing is running instead of opening a dialog", async () => {
+		const h = await harness();
+		await h.commands.get("bash-jobs")!("", h.ctx);
+		expect(h.fake.confirms).toHaveLength(0);
+	});
 });
