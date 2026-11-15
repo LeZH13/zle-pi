@@ -36,7 +36,7 @@ await tools.bash({ command: "git status", background: false });
 - `timeout` retains Pi's native meaning: seconds from execution start, with no default deadline. Backgrounding does not reset or remove an explicit deadline.
 - Foreground completion, nonzero exits, errors, rendering, and programmatic results retain native behavior. **Behavior change:** an ordinary command lasting past the threshold now returns a running acknowledgement rather than its final output. Scripts must handle that shape, or pass `background: false`.
 
-When a job finishes, a `bash-guard-background` custom message reports its ID, command preview, final state, exit code when available, and a bounded output tail. It is queued as steering while busy and triggers a turn when idle. The agent should continue independent work, or end its turn if nothing remains; it should not poll or rerun the command.
+When a job finishes, a `bash-guard-background` custom message reports its ID, command preview, final state, exit code when available, and a bounded output tail (4 KiB / 40 lines) — never the full accumulated output. It is queued as steering while busy and triggers a turn when idle. The agent should continue independent work, or end its turn if nothing remains; it should not poll or rerun the command.
 
 ### Seeing what is running
 
@@ -73,9 +73,11 @@ Lists omit output; `status` returns the latest bounded native output snapshot, c
 
 ### Lifetime and integration limits
 
-- Up to 16 commands run concurrently; the 20 most recent finished background jobs remain inspectable. IDs are runtime-local, not durable process handles.
-- Background jobs detach from the originating turn's abort signal once acknowledged. Use `bash_jobs` to cancel them; aborting a foreground call still kills it.
-- Reload, shutdown, and session switch/fork/tree-navigation attempts cancel and await owned commands, clear the registry, and suppress unsent completions. A vetoed navigation attempt still cancels jobs. Jobs do not survive Pi exiting. Use a live TUI/RPC session; print/JSON or auto-exiting subagents may exit before a result arrives.
+- Up to 16 commands run at once; the 20 most recent *finished background* jobs remain inspectable (a running job is never evicted). IDs are runtime-local, not durable process handles.
+- Background jobs detach from the originating turn's abort signal once acknowledged. That covers the automatic and the explicit `background: true` paths alike. Use `bash_jobs` to cancel them; aborting a foreground call still kills it.
+- Reload, shutdown, and session switch/fork/tree-navigation attempts cancel and await owned commands, clear the registry, and suppress unsent completions. A vetoed navigation attempt still cancels jobs. Shutdown waits up to 2s for aborted commands and then proceeds, so a process that ignores its abort signal cannot hang Pi — but it also is not guaranteed to be gone.
+- This is a hard kill, not a graceful shutdown. Pi's bash kills the process tree when the job is aborted, so a background `npm run dev` or migration will be terminated rather than sent `SIGTERM` and allowed to finish. Commands meant to outlive the session need to detach themselves (`nohup`, `setsid`, a service manager), and even then their output and completion are no longer tracked.
+- Jobs do not survive Pi exiting. Use a live TUI/RPC session; print/JSON or auto-exiting subagents may exit before a result arrives.
 - Completion is a custom message, not a second `tool_result`. Other extensions' tool-result-only redaction does not cover it. If the message queue is cleared (for example by Escape), a completion can be lost; the result remains in `bash_jobs` until cleanup/history eviction. Delivery errors are reported when a UI is available.
 - The existing watchdog footer continues tracking background commands. No separate terminal overlay or process daemon is added. If the watchdog is disabled, the widget row and `bash_jobs` still show job state.
 - Do not combine this with another extension replacing `bash`: one override wins, disabling this package's execution features if it loses. A tool allowlist must include `bash_jobs` if inspection/cancellation is needed. `--no-bash-guard` skips the bash override unless an enforced deny launch policy requires it; this also disables background parameters in that run.

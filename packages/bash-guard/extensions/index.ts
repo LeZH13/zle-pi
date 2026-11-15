@@ -110,18 +110,27 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		type: "string",
 		default: "clock",
 	});
-	const background = new BackgroundBash((job) => {
+	const background = new BackgroundBash(notifySettle);
+	/**
+	 * Deliver a completion to the agent. The model sees the job's state, its
+	 * bounded output tail, and where full output lives; `details` carries the
+	 * whole snapshot for the transcript renderer.
+	 */
+	function notifySettle(job: JobSnapshot): void {
+		const tail = job.output.trim() === "" ? "(no output)" : job.output;
+		const truncated = job.truncated ? "\n[output is a bounded tail; read full_output_path for the rest]" : "";
+		const where = job.full_output_path ? `\nFull output: ${job.full_output_path}` : "";
 		try {
 			pi.sendMessage({
 				customType: "bash-guard-background",
-				content: `Background bash ${job.job_id}: ${job.state}\n${JSON.stringify(job)}${job.truncated ? "\nOutput is a truncated tail; use full_output_path when present." : ""}`,
+				content: `Background bash ${job.job_id}: ${job.state} after ${job.wall_time_seconds.toFixed(1)}s\n${job.command}\n${tail}${truncated}${where}`,
 				details: job,
 				display: true,
 			}, { deliverAs: "steer", triggerTurn: true });
 		} catch (error) {
 			notifySafe(`Background result delivery failed: ${String(error)}. Use bash_jobs to inspect.`, "error");
 		}
-	});
+	}
 	const jobSchema = Type.Object({
 		job_id: Type.String(), command: Type.String(),
 		state: StringEnum(["running", "cancelling", "completed", "failed", "cancelled"]),

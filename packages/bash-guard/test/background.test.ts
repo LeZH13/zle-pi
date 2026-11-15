@@ -166,4 +166,58 @@ describe("background bash scheduling", () => {
 		await expect(jobs.execute({ command: "overflow", background: true, afterMs: 0, run: async () => result() })).rejects.toThrow("16");
 		await jobs.dispose();
 	});
+
+	it("counts retained finished jobs as inactive, not against the concurrency cap", async () => {
+		const jobs = new BackgroundBash(vi.fn());
+		for (let i = 0; i < 16; i++) {
+			await jobs.execute({ command: `done-${i}`, background: true, afterMs: 0, run: async () => result() });
+		}
+		await flush();
+		expect(jobs.backgroundJobs()).toHaveLength(16);
+		const next = await jobs.execute({ command: "next", background: true, afterMs: 0, run: async () => result() });
+		expect(next.structuredContent).toMatchObject({ status: "running" });
+		await jobs.dispose();
+	});
+
+	it("survives a throwing settle notifier and still records the result", async () => {
+		const jobs = new BackgroundBash(() => { throw new Error("delivery failed"); });
+		await jobs.execute({ command: "test", background: true, afterMs: 0, run: async () => result("kept") });
+		await flush();
+		const [job] = jobs.backgroundJobs();
+		expect(job).toMatchObject({ state: "completed", output: "kept" });
+		await expect(jobs.dispose()).resolves.toBeUndefined();
+	});
+
+	it("reports list entries as carrying no output rather than truncated", async () => {
+		const jobs = new BackgroundBash(vi.fn());
+		await jobs.execute({ command: "test", background: true, afterMs: 0, run: async () => result("short") });
+		await flush();
+		const [listed] = jobs.list();
+		expect(listed).toMatchObject({ output: "", truncated: false });
+		// The detail view still reports real truncation.
+		expect(jobs.list(listed!.job_id)[0]!.truncated).toBe(false);
+	});
+
+	it("returns from shutdown even when a command ignores its abort signal", async () => {
+		const jobs = new BackgroundBash(vi.fn());
+		await jobs.execute({ command: "stubborn", background: true, afterMs: 0, run: () => new Promise(() => {}) });
+		const started = Date.now();
+		await jobs.dispose();
+		expect(Date.now() - started).toBeLessThan(4000);
+		expect(jobs.backgroundJobs()).toEqual([]);
+	}, 10_000);
+
+	it("keeps running jobs when retention pruning drops settled ones", async () => {
+		const jobs = new BackgroundBash(vi.fn());
+		const live = deferred();
+		await jobs.execute({ command: "long", background: true, afterMs: 0, run: () => live.promise });
+		for (let i = 0; i < 24; i++) {
+			await jobs.execute({ command: `quick-${i}`, background: true, afterMs: 0, run: async () => result() });
+			await flush();
+		}
+		const retained = jobs.backgroundJobs();
+		expect(retained.some((job) => job.command === "long" && job.state === "running")).toBe(true);
+		expect(retained.filter((job) => job.state === "completed").length).toBeLessThanOrEqual(20);
+		await jobs.dispose();
+	});
 });

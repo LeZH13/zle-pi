@@ -32,12 +32,22 @@ type Outcome = { result: BashResult } | { error: unknown };
 export type JobChange = (job: JobSnapshot | undefined) => void;
 const MAX_RUNNING = 16;
 const MAX_COMPLETED = 20;
-
+/** How long shutdown waits for aborted commands before giving up on them. */
+const DISPOSE_GRACE_MS = 2000;
 export class BackgroundBash {
 	private jobs = new Map<string, Job>();
 	private generation = 0;
 
 	constructor(private readonly notify: (job: JobSnapshot) => void) {}
+
+	/** Deliver one completion now, outside the scheduler's own settle path. */
+	deliver(job: JobSnapshot): void {
+		try {
+			this.notify(job);
+		} catch {
+			// bash_jobs still reports the result.
+		}
+	}
 
 	private listeners = new Set<JobChange>();
 
@@ -92,8 +102,14 @@ export class BackgroundBash {
 			options.signal?.removeEventListener("abort", abort);
 			if (job.generation === this.generation) this.emit(job);
 			if (job.background && job.generation === this.generation) {
-				this.notify(this.describe(job));
 				this.prune();
+				// Prune first; the completion wakes the agent, and a throwing
+				// handler must not surface as an unhandled rejection here.
+				try {
+					this.notify(this.describe(job));
+				} catch {
+					// The job's own record still reports the result through bash_jobs.
+				}
 			}
 		});
 		let clearTimer: (() => void) | undefined;
@@ -135,7 +151,9 @@ export class BackgroundBash {
 			if (!job || !job.background) throw new Error(`Unknown background job: ${id}`);
 			return [this.describe(job)];
 		}
-		return [...this.jobs.values()].filter((job) => job.background).map((job) => ({ ...this.describe(job), output: "", truncated: job.snapshot.truncated || job.snapshot.output.length > 0 }));
+		// A list omits output, so `truncated` describes whether output is being
+		// withheld here. A job whose full tail fits was never truncated.
+		return this.backgroundJobs().map((job) => ({ ...job, output: "", truncated: false }));
 	}
 
 	cancel(id: string): JobSnapshot[] {
@@ -153,13 +171,23 @@ export class BackgroundBash {
 		this.generation++;
 		const jobs = [...this.jobs.values()];
 		for (const job of jobs) job.controller.abort();
-		await Promise.all(jobs.map((job) => job.done));
+		// A command that ignores its abort signal must not hang shutdown; the
+		// kill path is best-effort from here, and the table is cleared either way.
+		await Promise.race([
+			Promise.all(jobs.map((job) => job.done)),
+			new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, DISPOSE_GRACE_MS);
+				timer.unref?.();
+			}),
+		]);
 		this.jobs.clear();
 		this.emit(undefined);
 	}
 
 	private activeCount(): number {
-		return [...this.jobs.values()].filter((job) => !job.endedAt).length;
+		// Retained settled jobs stay in the table for inspection; they must not
+		// count against the concurrency cap.
+		return [...this.jobs.values()].filter((job) => job.endedAt === undefined).length;
 	}
 
 	private describe(job: Job): JobSnapshot {
@@ -171,8 +199,10 @@ export class BackgroundBash {
 	}
 
 	private prune(): void {
-		const completed = [...this.jobs.values()].filter((job) => job.endedAt !== undefined);
-		for (const job of completed.slice(0, -MAX_COMPLETED)) this.jobs.delete(job.id);
+		// `execute` also inserts foreground jobs, so the retention cap counts
+		// background jobs only and never evicts a command that is still running.
+		const settled = [...this.jobs.values()].filter((job) => job.background && job.endedAt !== undefined);
+		for (const job of settled.slice(0, -MAX_COMPLETED)) this.jobs.delete(job.id);
 	}
 }
 
