@@ -2,8 +2,8 @@
  * The `todo` tool and the `/todos` command.
  *
  * Enablement is per session and starts off; bare `/todos` toggles it,
- * `/todos status` reports, `collapse`/`expand` set the overlay view, and
- * `view` toggles it. Toggling never launches an agent turn.
+ * `/todos status` reports, `collapse`/`expand` set the overlay view.
+ * Toggling never launches an agent turn.
  *
  * Adapted from @juicesharp/rpiv-todo (Copyright 2026 juicesharp), MIT.
  * Modified by zle13: session-scoped enablement, view control, an execution
@@ -96,13 +96,12 @@ const SECTIONS: Array<{ key: "pending" | "inProgress" | "completed"; title: stri
 	{ key: "completed", title: "── Completed ──" },
 ];
 
-export const TODOS_USAGE = "/todos [status|collapse|expand|view]";
+export const TODOS_USAGE = "/todos [status|collapse|expand]";
 
 const COMPLETIONS: AutocompleteItem[] = [
 	{ value: "status", label: "status", description: "Report tracking state and tasks" },
 	{ value: "collapse", label: "collapse", description: "Collapse the overlay" },
 	{ value: "expand", label: "expand", description: "Expand the overlay" },
-	{ value: "view", label: "view", description: "Toggle collapsed/expanded" },
 ];
 
 /** Prefix-filtered argument completions; null when nothing matches. */
@@ -143,7 +142,7 @@ export function todoReportLines(
 
 export function registerTodosCommand(pi: ExtensionAPI, control: TodosControl): void {
 	pi.registerCommand(COMMAND_NAME, {
-		description: "/todos toggles tracking; /todos status reports; collapse|expand set the view; view toggles it",
+		description: "/todos toggles tracking; /todos status reports; collapse|expand set the view",
 		getArgumentCompletions: todoArgumentCompletions,
 		handler: async (args, ctx: ExtensionCommandContext) => {
 			const sessionId = sid(ctx);
@@ -175,12 +174,6 @@ export function registerTodosCommand(pi: ExtensionAPI, control: TodosControl): v
 				case "expand": {
 					control.setCollapsed(false);
 					ctx.ui.notify("Todos expanded", "info");
-					return;
-				}
-				case "view": {
-					const collapsed = !control.isCollapsed();
-					control.setCollapsed(collapsed);
-					ctx.ui.notify(collapsed ? "Todos collapsed" : "Todos expanded", "info");
 					return;
 				}
 				default: {

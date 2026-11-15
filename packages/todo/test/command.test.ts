@@ -130,7 +130,7 @@ describe("/todos status", () => {
 	});
 });
 
-describe("/todos collapse|expand|view", () => {
+describe("/todos collapse|expand", () => {
 	it("collapse/expand set the view and persist the global preference across starts", async () => {
 		const h = setup();
 		await h.enable();
@@ -146,21 +146,7 @@ describe("/todos collapse|expand|view", () => {
 		expect(next.renderWidget(80)[0]).toBe("▾ Todos (0/1)");
 	});
 
-	it("view toggles collapse/expand in both directions and persists", async () => {
-		const h = setup();
-		await h.enable();
-		await h.runTodo({ action: "create", subject: "First" });
-
-		await h.command("view");
-		expect(h.notify).toHaveBeenLastCalledWith("Todos expanded", "info");
-		expect(h.renderWidget(80)[0]).toBe("▾ Todos (0/1)");
-		expect(prefsFile(h)).toContain('"collapsed": false');
-
-		await h.command("view");
-		expect(h.notify).toHaveBeenLastCalledWith("Todos collapsed", "info");
-		expect(h.renderWidget(80)[0]).toBe("▸ Todos 0/1");
-		expect(prefsFile(h)).toContain('"collapsed": true');
-	});
+	// view subcommand removed; collapse toggles via mouse click in fullscreen mode.
 });
 
 describe("argument completions", () => {
@@ -171,12 +157,11 @@ describe("argument completions", () => {
 			{ value: "status", label: "status", description: "Report tracking state and tasks" },
 			{ value: "collapse", label: "collapse", description: "Collapse the overlay" },
 			{ value: "expand", label: "expand", description: "Expand the overlay" },
-			{ value: "view", label: "view", description: "Toggle collapsed/expanded" },
 		]);
 		expect(completions("col")).toEqual([{ value: "collapse", label: "collapse", description: "Collapse the overlay" }]);
 		expect(completions("s")).toEqual([{ value: "status", label: "status", description: "Report tracking state and tasks" }]);
 		expect(completions("e")).toEqual([{ value: "expand", label: "expand", description: "Expand the overlay" }]);
-		expect(completions("v")).toEqual([{ value: "view", label: "view", description: "Toggle collapsed/expanded" }]);
+		expect(completions("v")).toBeNull();
 		expect(completions("on")).toBeNull();
 		expect(completions("x")).toBeNull();
 	});
@@ -189,7 +174,7 @@ describe("obsolete and unknown arguments", () => {
 		for (const arg of ["on", "off", "toggle", "frobnicate"]) {
 			h.notify.mockClear();
 			await h.command(arg);
-			expect(h.notify).toHaveBeenCalledWith("Usage: /todos [status|collapse|expand|view]", "warning");
+			expect(h.notify).toHaveBeenCalledWith("Usage: /todos [status|collapse|expand]", "warning");
 		}
 		// Obsolete args must not change enablement.
 		expect(getSessionEnabled(h.manager.getSessionId())).toBe(false);
@@ -199,7 +184,7 @@ describe("obsolete and unknown arguments", () => {
 		const h = setup();
 		await h.start();
 		await h.command("OFF"); // case-sensitive lookup after trim/lowercase is applied
-		expect(h.notify).toHaveBeenLastCalledWith("Usage: /todos [status|collapse|expand|view]", "warning");
+		expect(h.notify).toHaveBeenLastCalledWith("Usage: /todos [status|collapse|expand]", "warning");
 	});
 });
 

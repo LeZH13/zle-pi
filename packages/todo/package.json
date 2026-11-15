@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-todo",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A visible todo list for Pi: session-scoped task tracking, /todos control surface, and a collapsible live overlay.",
   "type": "module",
   "keywords": [

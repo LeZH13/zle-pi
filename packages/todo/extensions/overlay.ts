@@ -14,7 +14,7 @@
  * preferences, completed tasks stay visible, i18n removed.
  */
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { type TUI, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth } from "@earendil-works/pi-tui";
 import { STATUS_LABEL, formatOverlayTaskLine, sanitizeTerminalText } from "./format.js";
 import { selectHasActive, selectOverlayLayout, selectShowTaskIds, selectTodoCounts } from "./selectors.js";
 import { getRenderState } from "./store.js";
@@ -76,6 +76,12 @@ export class TodoOverlay {
 					return {
 						render: (width: number) => this.renderWidget(this.uiCtx?.theme ?? factoryTheme, width),
 						invalidate: () => {},
+						handleMouse: (event: TuiMouseEvent): TuiMouseEventResult | undefined => {
+							if (event.type === "click" && event.button === "left" && event.y === 0) {
+								this.setCollapsed(!this.collapsed);
+								return { handled: true };
+							}
+						},
 					};
 				},
 				{ placement: "aboveEditor" },
