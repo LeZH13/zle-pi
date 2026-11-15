@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-footer",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Show concise repository identity, Codex status, cumulative usage metrics, context window usage, model thinking level, and active agent duration in Pi footer.",
   "type": "module",
   "keywords": [

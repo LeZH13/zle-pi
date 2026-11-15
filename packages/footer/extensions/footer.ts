@@ -585,6 +585,7 @@ export default function footerExtension(pi: ExtensionAPI): void {
 	let refreshRuntime: (() => Promise<void>) | undefined;
 	let currentContext: ExtensionContext | undefined;
 	let config: FooterConfig = loadConfig();
+	let turnStartedAt: number | undefined;
 
 	let repo = "";
 	let gitSummary = EMPTY_GIT_SUMMARY;
@@ -644,6 +645,7 @@ export default function footerExtension(pi: ExtensionAPI): void {
 		startActive();
 		promptOutputTokens = 0;
 		promptGenerationSeconds = 0;
+		turnStartedAt = performance.now();
 	});
 
 	pi.on("ui_prompt_start", () => {
@@ -659,6 +661,11 @@ export default function footerExtension(pi: ExtensionAPI): void {
 		if (finalizeActive()) {
 			pi.appendEntry(AGENT_TIME_ENTRY, activeMilliseconds);
 		}
+		if (turnStartedAt !== undefined && ctx.hasUI) {
+			const elapsed = performance.now() - turnStartedAt;
+			ctx.ui.notify(`worked for ${formatDuration(elapsed)}`, "info");
+		}
+		turnStartedAt = undefined;
 		await refreshGitStatus?.();
 	});
 

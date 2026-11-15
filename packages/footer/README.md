@@ -95,6 +95,7 @@ custom-extension-status                                                ◷ 16m 2
   - Live 1-second interval update while the agent is running.
   - Persisted in session entries (`pi-footer:agent-work`), preserving elapsed time across session reloads.
   - On narrow terminals, left extension statuses truncate first to ensure the timer remains visible.
+  - On agent completion, fires a `worked for <duration>` notification summarizing the elapsed time for that response.
 
 ---
 
