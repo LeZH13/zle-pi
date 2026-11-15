@@ -1,9 +1,10 @@
 # @zle13/pi-bash-guard
 
-A guard and a watchdog for Pi's `bash` tool, both backed by **Jev** (TypeSafe System One, a decision-only classifier).
+A guard and a watchdog for Pi's `bash` tool, both backed by **Jev** (TypeSafe System One, a decision-only classifier), with session-owned background command execution.
 
 - **Guard:** before a risky command runs, Jev judges whether it could cause irreversible loss. Recoverable commands pass; the rest ask you - or are blocked outright in deny mode.
 - **Watchdog:** while a command runs, Jev checks periodically whether it is still making progress. Stuck or looping commands are killed; long-lived services are left alone.
+- **Background jobs:** run a command asynchronously and keep working. Approval checks, native timeout/process cleanup, and watchdog monitoring stay in the same execution path. Completion wakes the agent without polling.
 
 ```sh
 pi install npm:@zle13/pi-bash-guard
@@ -15,6 +16,69 @@ pi -e npm:@zle13/pi-bash-guard   # try once
 **0.5.0:** a project-level `<cwd>/.pi/bash-guard.json` may now only tighten the guard for its directory. Previously it could set `guard.enabled: false`, add `allowPatterns`, raise `allowBelow`, or repoint `jev.endpoint` - which let any cloned repo switch the guard off, whitelist commands, or send this machine's commands elsewhere. Those keys are now ignored with a warning; put them in `~/.pi/agent/bash-guard.json` instead.
 
 **0.4.1 fixes extension loading for managed installs on Pi 1.x.** Custom endpoints use Pi's exposed built-in provider API rather than a raw SDK subpath. Configuration and guard behavior are unchanged.
+
+## Background commands (0.6.0)
+
+The `bash` tool adds an optional `background` parameter:
+
+```js
+await tools.bash({ command: "npm test", background: true, timeout: 600 });
+// { status: "running", job_id: "bg-..." }
+
+await tools.bash({ command: "git status", background: false });
+// Normal native bash result: { output, exit_code, truncated, wall_time_seconds, ... }
+```
+
+- `background: true` returns immediately. A running acknowledgement is not a successful command result.
+- Omit `background` to wait normally, automatically yielding after **60 seconds** if still running. The command is not restarted.
+- `background: false` forces foreground execution, even past the automatic threshold.
+- Use `--bash-background-after 10` to change the threshold for an invocation, or `--bash-background-after 0` to disable automatic backgrounding. Explicit `background: true` still works.
+- `timeout` retains Pi's native meaning: seconds from execution start, with no default deadline. Backgrounding does not reset or remove an explicit deadline.
+- Foreground completion, nonzero exits, errors, rendering, and programmatic results retain native behavior. **Behavior change:** an ordinary command lasting past the threshold now returns a running acknowledgement rather than its final output. Scripts must handle that shape, or pass `background: false`.
+
+When a job finishes, a `bash-guard-background` custom message reports its ID, command preview, final state, exit code when available, and a bounded output tail. It is queued as steering while busy and triggers a turn when idle. The agent should continue independent work, or end its turn if nothing remains; it should not poll or rerun the command.
+
+### Seeing what is running
+
+A background acknowledgement is a *final* tool result, so Pi stops that block's own elapsed clock. Left alone, a running job would look finished. Bash Guard re-renders the block from live job state instead, using one 1 Hz tick shared with the row above the editor:
+
+```text
+⛨ bash sleep 8; printf 'BACKGROUND_OK\n'  (timeout 20s)
+▶ running · 3s · bg-588d7673
+
+# the same block, after the job settles — no new block, no flash
+⛨ bash sleep 8; printf 'BACKGROUND_OK\n'  (timeout 20s)
+✓ completed · 8s · exit 0
+
+# above the editor, while any job runs
+▶ 2 bg · 12s │ 5m03s   npm start
+```
+
+State glyphs, identical in the block and the widget row: `▶` running, `◐` cancelling, `✓` completed, `✗` failed, `⊘` cancelled. A failed job names its cause (`timed out after 1s`, `exit 2`, or the watchdog's kill reason). A live job keeps its job ID; settled jobs drop it.
+
+Motion is the advancing clock, not a spinner: the agent's working indicator already owns spinners in the transcript, and a second one would compete with it. The widget row shows the oldest │ newest elapsed plus the newest command, so 16 concurrent jobs still cost one line; it disappears when the last job settles. Nothing animates outside a TUI, and every ticker is disposed on settle, session change, and shutdown.
+
+`--bash-bg-animation off` renders a static snapshot and stops the 1 Hz job tick. The watchdog footer clock is unaffected.
+
+Inspect or cancel with the `bash_jobs` tool:
+
+```js
+await tools.bash_jobs({ action: "list" });
+await tools.bash_jobs({ action: "status", job_id: "bg-..." });
+await tools.bash_jobs({ action: "cancel", job_id: "bg-..." });
+// { jobs: [...] }
+```
+
+Lists omit output; `status` returns the latest bounded native output snapshot, capped at 40 lines / 4 KiB. A `truncated` flag discloses omitted output. If Pi retained full output, `full_output_path` points to its native file; use `read` to inspect it. No full-output file is promised for short output. Jobs transition through `running`, `cancelling`, `completed`, `failed`, or `cancelled`. Cancel uses Pi's native abort/process-tree cleanup, not graceful service shutdown. Watchdog kills and timeouts report `failed` with their reason.
+
+### Lifetime and integration limits
+
+- Up to 16 commands run concurrently; the 20 most recent finished background jobs remain inspectable. IDs are runtime-local, not durable process handles.
+- Background jobs detach from the originating turn's abort signal once acknowledged. Use `bash_jobs` to cancel them; aborting a foreground call still kills it.
+- Reload, shutdown, and session switch/fork/tree-navigation attempts cancel and await owned commands, clear the registry, and suppress unsent completions. A vetoed navigation attempt still cancels jobs. Jobs do not survive Pi exiting. Use a live TUI/RPC session; print/JSON or auto-exiting subagents may exit before a result arrives.
+- Completion is a custom message, not a second `tool_result`. Other extensions' tool-result-only redaction does not cover it. If the message queue is cleared (for example by Escape), a completion can be lost; the result remains in `bash_jobs` until cleanup/history eviction. Delivery errors are reported when a UI is available.
+- The existing watchdog footer continues tracking background commands. No separate terminal overlay or process daemon is added. If the watchdog is disabled, the widget row and `bash_jobs` still show job state.
+- Do not combine this with another extension replacing `bash`: one override wins, disabling this package's execution features if it loses. A tool allowlist must include `bash_jobs` if inspection/cancellation is needed. `--no-bash-guard` skips the bash override unless an enforced deny launch policy requires it; this also disables background parameters in that run.
 
 ## Approval modes
 

@@ -39,7 +39,10 @@ import {
 	type ExtensionUIContext,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Text, type AutocompleteItem } from "@earendil-works/pi-tui";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Container, Text, truncateToWidth, type AutocompleteItem, type TUI } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { BackgroundBash, type JobSnapshot } from "../src/background.js";
 import {
 	APPROVAL_MODE_ENV,
 	DEFAULT_CONFIG,
@@ -54,6 +57,7 @@ import { RISKY_RULES, compilePatterns, type RiskyScan } from "../src/rules.js";
 import { publishRuntimeMarker, readPackageVersion } from "../src/runtime.js";
 import { ALLOW_ENTRY_TYPE, restoreState, SETTINGS_ENTRY_TYPE, type GuardMode, type SessionSettings } from "../src/state.js";
 import { renderStatus, type GuardTally, type StatusStyler } from "../src/status.js";
+import { activeCount, isActive, renderJobLine, renderWidgetLine, type JobStyler } from "../src/render.js";
 import { Watchdog, type WatchCheckRecord } from "../src/watchdog.js";
 
 const FLAG_NAME = "no-bash-guard";
@@ -70,6 +74,21 @@ const GUARD_SCORE_MAP_LIMIT = 512;
 /** Footer clock refresh while watched commands run. */
 const STATUS_TICK_MS = 1000;
 
+/** Above-editor row for background jobs; the widget factory recreates it after reload. */
+const WIDGET_KEY = "bash-guard-background";
+
+/** Cast a theme into background-job styles; a UI without a usable theme still renders. */
+function jobStyler(theme: ExtensionUIContext["theme"]): JobStyler {
+	return (text, kind) => {
+		try {
+			if (theme?.fg) return theme.fg(kind, text);
+		} catch {
+			// Fall through to plain text.
+		}
+		return text;
+	};
+}
+
 export default function bashGuardExtension(pi: ExtensionAPI): void {
 	// Capability marker for embedded consumers: not-ready until session_start
 	// completes; replaced on reload; cleared on session_shutdown.
@@ -79,6 +98,46 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		description: "Disable the bash-guard guard and watchdog for this run",
 		type: "boolean",
 		default: false,
+	});
+
+	pi.registerFlag("bash-background-after", {
+		description: "Automatically background bash after this many seconds (0 disables; default 60)",
+		type: "string",
+		default: "60",
+	});
+	pi.registerFlag("bash-bg-animation", {
+		description: "Background job clock: clock (1 Hz) or off (static snapshot)",
+		type: "string",
+		default: "clock",
+	});
+	const background = new BackgroundBash((job) => {
+		try {
+			pi.sendMessage({
+				customType: "bash-guard-background",
+				content: `Background bash ${job.job_id}: ${job.state}\n${JSON.stringify(job)}${job.truncated ? "\nOutput is a truncated tail; use full_output_path when present." : ""}`,
+				details: job,
+				display: true,
+			}, { deliverAs: "steer", triggerTurn: true });
+		} catch (error) {
+			notifySafe(`Background result delivery failed: ${String(error)}. Use bash_jobs to inspect.`, "error");
+		}
+	});
+	const jobSchema = Type.Object({
+		job_id: Type.String(), command: Type.String(),
+		state: StringEnum(["running", "cancelling", "completed", "failed", "cancelled"]),
+		wall_time_seconds: Type.Number(), output: Type.String(), truncated: Type.Boolean(),
+		exit_code: Type.Optional(Type.Number()), full_output_path: Type.Optional(Type.String()),
+	});
+	pi.registerTool({
+		name: "bash_jobs", label: "Bash jobs",
+		description: "List, inspect, or cancel background bash jobs. Completion arrives automatically; do not poll. Output is a bounded tail; read full_output_path when present for full output.",
+		parameters: Type.Object({ action: StringEnum(["list", "status", "cancel"]), job_id: Type.Optional(Type.String()) }),
+		outputSchema: Type.Object({ jobs: Type.Array(jobSchema) }),
+		async execute(_id, { action, job_id }) {
+			if (action !== "list" && !job_id) throw new Error("job_id is required for status and cancel");
+			const jobs = action === "cancel" ? background.cancel(job_id!) : background.list(action === "status" ? job_id : undefined);
+			return { content: [{ type: "text", text: JSON.stringify({ jobs }) }], details: undefined, structuredContent: { jobs } };
+		},
 	});
 
 	// --- shared session state -------------------------------------------------
@@ -109,6 +168,12 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let risky: RiskyScan = { rules: RISKY_RULES, extra: [], allow: [] };
 	let tally: GuardTally = { passed: 0, asked: 0, blocked: 0 };
 	let statusTick: ReturnType<typeof setInterval> | undefined;
+	/** One ticker drives the widget row and every running block's clock. */
+	let jobTick: ReturnType<typeof setInterval> | undefined;
+	let widgetMounted = false;
+	let tui: TUI | undefined;
+	const blockRefreshers = new Set<(() => void) & { jobId?: string }>();
+	const syncJobUi = (): void => syncBackgroundUi();
 	let runtimeReady = false;
 	// Pi announces tool_execution_start before approval. Only our execute
 	// wrapper marks a call as actually running; renderer state survives map cleanup.
@@ -230,10 +295,14 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 
 	/** Tick the footer clock only while watched commands run. */
 	function syncStatusTick(): void {
-		const running = (watchdog?.runningCount() ?? 0) > 0;
-		if (running && !statusTick) {
-			statusTick = setInterval(() => refreshStatus(), STATUS_TICK_MS);
-		} else if (!running && statusTick) {
+		// The footer clock follows watched commands and live background jobs, so
+		// one timer serves both. `--bash-bg-animation off` freezes job clocks but
+		// leaves the watchdog clock accurate.
+		const watched = (watchdog?.runningCount() ?? 0) > 0;
+		const jobs = animationOn() && hasActiveJobs();
+		if (watched || jobs) {
+			if (!statusTick) statusTick = setInterval(() => refreshStatus(), STATUS_TICK_MS);
+		} else if (statusTick) {
 			clearInterval(statusTick);
 			statusTick = undefined;
 		}
@@ -244,14 +313,99 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		statusTick = undefined;
 	}
 
+	// --- background job presentation -------------------------------------------
+
+	/** `--bash-bg-animation off` renders a static snapshot and stops the 1 Hz tick. */
+	const animationOn = (): boolean => pi.getFlag("bash-bg-animation") !== "off";
+
+	const backgroundJobs = (): JobSnapshot[] => background.backgroundJobs();
+
+	function hasActiveJobs(): boolean {
+		return activeCount(backgroundJobs()) > 0;
+	}
+
+	/**
+	 * One interval redraws the widget row and every running block. A block's own
+	 * renderer cannot restart its clock: Pi clears that interval once the
+	 * background acknowledgement counts as a final result.
+	 */
+	function syncJobTick(): void {
+		const running = animationOn() && hasActiveJobs();
+		if (running && !jobTick) {
+			jobTick = setInterval(flushJobUi, STATUS_TICK_MS);
+		} else if (!running && jobTick) {
+			clearInterval(jobTick);
+			jobTick = undefined;
+		}
+		syncStatusTick();
+	}
+
+	/**
+	 * Redraw the widget and every running block. Called on each tick and once
+	 * more when the last job settles, so a block shows its final state instead
+	 * of freezing on the last `running` frame.
+	 */
+	function flushJobUi(): void {
+		tui?.requestRender();
+		for (const refresh of [...blockRefreshers]) refresh();
+	}
+
+	/** Mount above the editor while jobs run; disappear when the last one settles. */
+	function syncBackgroundWidget(ctx?: ExtensionContext): void {
+		const sink = ctx?.hasUI ? ctx.ui : ui;
+		const wanted = sink !== undefined && activeCount(backgroundJobs()) > 0;
+		if (!wanted) {
+			if (widgetMounted && sink) sink.setWidget(WIDGET_KEY, undefined);
+			widgetMounted = false;
+			return;
+		}
+		if (!sink) return;
+		if (!widgetMounted) {
+			sink.setWidget(WIDGET_KEY, (nextTui, theme) => {
+				tui = nextTui;
+				const styler = jobStyler(theme);
+				return {
+					invalidate() {},
+					render(width: number): string[] {
+						const rows = renderWidgetLine(backgroundJobs(), styler, width);
+						return rows.map((row) => truncateToWidth(row, width));
+					},
+				};
+			}, { placement: "aboveEditor" });
+			widgetMounted = true;
+		}
+		tui?.requestRender();
+	}
+
+	function syncBackgroundUi(ctx?: ExtensionContext): void {
+		syncBackgroundWidget(ctx);
+		syncJobTick();
+		// Settling is the last state change a block sees; paint it before the
+		// ticker stops, and let the watchdog clock follow live commands.
+		flushJobUi();
+		refreshStatus(ctx);
+	}
+
+	function teardownBackgroundUi(): void {
+		if (jobTick) clearInterval(jobTick);
+		jobTick = undefined;
+		blockRefreshers.clear();
+		if (widgetMounted && ui) ui.setWidget(WIDGET_KEY, undefined);
+		widgetMounted = false;
+		tui = undefined;
+	}
+
+	background.onChange(syncJobUi);
+
 	function ensureBashOverride(cwd: string): void {
-		if (bashRegistered || (!guardOn() && !watchdogOn())) return;
+		if (bashRegistered || (flagDisabled() && !guardOn())) return;
 		const inner = createLocalBashOperations();
 		const operations: BashOperations = {
 			exec: async (command, execCwd, options) => {
 				if (!watchdogOn()) return inner.exec(command, execCwd, options);
 				const controller = new AbortController();
-				const entry = watchdog!.start(command, execCwd, { abort: () => controller.abort() });
+				const activeWatchdog = watchdog!;
+				const entry = activeWatchdog.start(command, execCwd, { abort: () => controller.abort() });
 				syncStatusTick();
 				refreshStatus();
 				const outer = options.signal;
@@ -266,17 +420,17 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 						signal: controller.signal,
 						onData: (data) => {
 							options.onData(data);
-							watchdog!.recordOutput(entry, data.toString("utf8"));
+							activeWatchdog.recordOutput(entry, data.toString("utf8"));
 						},
 					});
 				} catch (error) {
-					if (watchdog!.isKilled(entry)) {
-						throw new Error(watchdog!.killMessage(entry));
+					if (activeWatchdog.isKilled(entry)) {
+						throw new Error(activeWatchdog.killMessage(entry));
 					}
 					throw error;
 				} finally {
 					outer?.removeEventListener("abort", onOuterAbort);
-					watchdog!.finish(entry);
+					activeWatchdog.finish(entry);
 					syncStatusTick();
 					refreshStatus();
 				}
@@ -285,12 +439,26 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		const bash = createBashToolDefinition(cwd, { operations });
 		pi.registerTool({
 			...bash,
-			execute: async (toolCallId, ...args) => {
+			description: `${bash.description}\nSet background:true to return immediately and continue other work. Unspecified background yields after 60s by default; background:false forces foreground. Completion arrives automatically; do not poll. Background commands retain timeout and watchdog enforcement.`,
+			parameters: Type.Object({
+				...bash.parameters.properties,
+				background: Type.Optional(Type.Boolean({ description: "true: background immediately; false: force foreground; omitted: automatic backgrounding" })),
+			}),
+			outputSchema: Type.Union([bash.outputSchema!, Type.Object({ status: Type.Literal("running"), job_id: Type.String() })]),
+			execute: async (toolCallId, params, signal, onUpdate, ctx) => {
 				const timing = executionState(toolCallId);
 				timing.started = true;
 				const startedAt = performance.now();
 				try {
-					return await bash.execute(toolCallId, ...args);
+					const afterSec = Number(pi.getFlag("bash-background-after") ?? "60");
+					if (!Number.isFinite(afterSec) || afterSec < 0 || afterSec > 2_147_483) {
+						throw new Error("--bash-background-after must be between 0 and 2147483 seconds");
+					}
+					const { background: requested, ...nativeParams } = params;
+					return await background.execute({
+						command: params.command, background: requested, afterMs: afterSec * 1000, signal, onUpdate,
+						run: (jobSignal, update) => createBashToolDefinition(ctx.cwd, { operations }).execute(toolCallId, nativeParams, jobSignal, update, ctx),
+					});
 				} finally {
 					timing.durationMs = performance.now() - startedAt;
 				}
@@ -368,6 +536,11 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	// render Jev's verdict in a dim line. The built-in renderCall reuses
 	// context.lastComponent (a Text it mutates via setText), so delegate with a
 	// fresh component and compose a container whenever a score is present.
+	//
+	// A background acknowledgement also lands here. Pi treats it as a final
+	// result and stops the block's own elapsed clock (and hides the default
+	// "Took" line), which would leave a running job looking finished. Such
+	// blocks render from live job state instead and refresh on the shared tick.
 	pi.registerToolRenderer((toolName, next) => {
 		if (toolName !== "bash") return next();
 		const base = next();
@@ -385,10 +558,55 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				return container;
 			},
 			renderResult: base.renderResult
-				? (result, options, theme, context) => base.renderResult!(result, options, theme, executionContext(context))
+				? (result, options, theme, context) => {
+					const jobId = backgroundJobId(result, options);
+					if (jobId === undefined) return base.renderResult!(result, options, theme, executionContext(context));
+					return jobComponent(jobId, theme, context);
+				}
 				: undefined,
 		};
 	});
+
+	/** The job id behind a background acknowledgement, or undefined for a normal result. */
+	function backgroundJobId(result: { structuredContent?: unknown }, options: { isPartial: boolean }): string | undefined {
+		if (options.isPartial) return undefined;
+		const data = result.structuredContent as { status?: unknown; job_id?: unknown } | undefined;
+		return data?.status === "running" && typeof data.job_id === "string" ? data.job_id : undefined;
+	}
+
+	/** A block that keeps its clock while the job runs and settles in place. */
+	function jobComponent(jobId: string, theme: ExtensionUIContext["theme"], context: { state: Record<string, unknown>; invalidate: () => void }): Container {
+		const styler = jobStyler(theme);
+		const container = new Container();
+		const line = new Text("", 0, 0);
+		container.addChild(line);
+		const refresh = ((): (() => void) & { jobId?: string } => {
+			const registered = (): void => {
+				paint();
+				context.invalidate();
+			};
+			registered.jobId = jobId;
+			return registered;
+		})();
+		/** Repaint from live state; detach once the row can no longer change. */
+		function paint(): void {
+			const job = backgroundJobs().find((entry) => entry.job_id === jobId);
+			if (!job) {
+				blockRefreshers.delete(refresh);
+				line.setText(styler("job result evicted", "muted"));
+				return;
+			}
+			line.setText(renderJobLine(job, styler));
+			if (!isActiveJob(job)) blockRefreshers.delete(refresh);
+		}
+		// Pi may re-invoke this renderer for the same row; one refresher per job.
+		for (const registered of [...blockRefreshers]) if (registered.jobId === jobId) blockRefreshers.delete(registered);
+		paint();
+		if (backgroundJobs().some((job) => job.job_id === jobId && isActiveJob(job))) blockRefreshers.add(refresh);
+		return container;
+	}
+
+	const isActiveJob = (job: JobSnapshot): boolean => isActive(job.state);
 
 	// --- guard ---------------------------------------------------------------
 
@@ -432,6 +650,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	// --- session lifecycle ---------------------------------------------------
 
 	pi.on("session_start", async (_event, ctx) => {
+		await background.dispose();
 		ui = ctx.hasUI ? ctx.ui : undefined;
 		currentRegistry = ctx.modelRegistry;
 		const onError = (message: string): void => {
@@ -487,6 +706,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		}
 
 		stopStatusTick();
+		teardownBackgroundUi();
 		watchdog?.dispose();
 		watchdog = new Watchdog({
 			config,
@@ -520,7 +740,12 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		refreshStatus(ctx);
 	});
 
-	pi.on("session_shutdown", (_event, ctx) => {
+	pi.on("session_before_switch", () => background.dispose());
+	pi.on("session_before_fork", () => background.dispose());
+	pi.on("session_before_tree", () => background.dispose());
+
+	pi.on("session_shutdown", async (_event, ctx) => {
+		await background.dispose();
 		stopStatusTick();
 		watchdog?.dispose();
 		executions.clear();

@@ -1,0 +1,193 @@
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, it, vi } from "vitest";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition, ToolRendererResolver } from "@earendil-works/pi-coding-agent";
+import bashGuard from "../extensions/index.js";
+
+const cleanup: (() => Promise<void>)[] = [];
+afterEach(async () => {
+	for (const stop of cleanup.splice(0)) await stop();
+	vi.unstubAllEnvs();
+	vi.useRealTimers();
+});
+
+const theme = { fg: (_kind: string, text: string) => text };
+
+/** A UI context that records widget mounts and forces a redraw on demand. */
+function fakeUi() {
+	const widgets = new Map<string, (tui: unknown, theme: unknown) => { render(width: number): string[] }>();
+	const renders = { count: 0 };
+	const tui = { requestRender: () => { renders.count++; } };
+	const statuses: string[] = [];
+	const ui = {
+		theme,
+		setStatus: (_key: string, value: string | undefined) => { if (value) statuses.push(value); },
+		setWidget: (key: string, content: unknown) => {
+			if (content === undefined) widgets.delete(key);
+			else widgets.set(key, content as never);
+		},
+		notify: vi.fn(),
+	};
+	return { ui, widgets, renders, tui, statuses };
+}
+
+async function harness(options: { after?: string; animation?: string; ui?: boolean } = {}) {
+	const cwd = mkdtempSync(join(tmpdir(), "bash-guard-ui-"));
+	const agentDir = join(cwd, "agent");
+	mkdirSync(agentDir);
+	writeFileSync(join(agentDir, "bash-guard.json"), JSON.stringify({ watchdog: { enabled: false } }));
+	vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+	vi.stubEnv("PI_BASH_GUARD_APPROVAL_MODE", "deny");
+	const flags = new Map<string, unknown>([
+		["bash-background-after", options.after ?? "60"],
+		["bash-bg-animation", options.animation ?? "clock"],
+	]);
+	const tools = new Map<string, ToolDefinition>();
+	type Handler = (event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown;
+	const handlers = new Map<string, Handler[]>();
+	let resolver: ToolRendererResolver | undefined;
+	const fake = fakeUi();
+	const pi = {
+		registerFlag: (name: string, config: { default: unknown }) => { if (!flags.has(name)) flags.set(name, config.default); },
+		getFlag: (name: string) => flags.get(name),
+		registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
+		registerToolRenderer: (value: ToolRendererResolver) => { resolver = value; },
+		registerCommand: vi.fn(),
+		on: (name: string, handler: Handler) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
+		getAllTools: () => [...tools.values()].map((tool) => ({ name: tool.name, sourceInfo: { path: "/pi-bash-guard/extensions/index.ts" } })),
+		sendMessage: vi.fn(), sendUserMessage: vi.fn(),
+	} as unknown as ExtensionAPI;
+	bashGuard(pi);
+	const ctx = {
+		cwd, hasUI: options.ui ?? true, mode: "tui", ui: fake.ui,
+		sessionManager: { getBranch: () => [], getSessionId: () => "ui-test", getSessionFile: () => undefined },
+	} as unknown as ExtensionContext;
+	async function emit(name: string, event = {}) {
+		for (const handler of handlers.get(name) ?? []) await handler({ type: name, ...event }, ctx);
+	}
+	cleanup.push(async () => {
+		await emit("session_shutdown");
+		rmSync(cwd, { recursive: true, force: true });
+	});
+	await emit("session_start");
+	let nextId = 0;
+	async function call(name: string, params: Record<string, unknown>) {
+		const tool = tools.get(name)!;
+		return tool.execute(`call-${++nextId}`, params, undefined, undefined, ctx as never);
+	}
+	/** Render the block for a background acknowledgement through the real resolver. */
+	function renderBlock(toolCallId: string, result: { content: never[]; details: undefined; structuredContent?: unknown }, state = {}) {
+		const base = { renderCall: () => ({ render: () => [] }), renderResult: () => ({ render: () => [] }) };
+		const renderers = resolver!("bash", () => base as never)!;
+		const invalidate = vi.fn();
+		const component = renderers.renderResult!(
+			result as never,
+			{ expanded: false, isPartial: false },
+			theme as never,
+			{ toolCallId, state, invalidate, executionStarted: true } as never,
+		) as { render(width: number): string[] };
+		return { component, invalidate, lines: () => component.render(200).map((line) => line.trim()).filter(Boolean) };
+	}
+	return { call, emit, fake, renderBlock, tools, resolver: () => resolver! };
+}
+
+
+const idle = `${JSON.stringify(process.execPath)} -e 'setInterval(() => {}, 1000)'`;
+
+it("mounts one aggregate widget row with the newest command while a job runs", async () => {
+	const h = await harness();
+	const ack = await h.call("bash", { command: idle, background: true });
+	const widget = h.fake.widgets.get("bash-guard-background");
+	expect(widget).toBeDefined();
+	const rows = widget!(h.fake.tui, theme).render(200);
+	expect(rows).toHaveLength(1);
+	expect(rows[0]).toMatch(/▶ 1 bg · 0:0\d/);
+	expect(rows[0]).toContain("setInterval");
+	expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(200);
+	await h.call("bash_jobs", { action: "cancel", job_id: (ack.structuredContent as { job_id: string }).job_id });
+});
+
+it("keeps a running block's clock live and settles it in place", async () => {
+	const h = await harness();
+	const ack = await h.call("bash", { command: idle, background: true });
+	const jobId = (ack.structuredContent as { job_id: string }).job_id;
+	const result = { content: [], details: undefined, structuredContent: { status: "running", job_id: jobId } };
+	const block = h.renderBlock("call-1", result as never);
+	expect(block.lines().join("\n")).toBe(`▶ running · 0:00 · ${jobId}`);
+
+	// The shared ticker advances the clock without any new tool result.
+	await new Promise((resolve) => setTimeout(resolve, 1100));
+	expect(block.lines().join("\n")).toMatch(/▶ running · 0:0[12]/);
+	expect(block.invalidate).toHaveBeenCalled();
+
+	await h.call("bash_jobs", { action: "cancel", job_id: jobId });
+	await vi.waitFor(() => expect(block.lines().join("\n")).toContain("cancelled"));
+	expect(block.lines().join("\n")).not.toContain("running");
+});
+
+it("drops the widget and stops ticking once the last job settles", async () => {
+	const h = await harness();
+	const ack = await h.call("bash", { command: idle, background: true });
+	const jobId = (ack.structuredContent as { job_id: string }).job_id;
+	const before = h.fake.renders.count;
+	await h.call("bash_jobs", { action: "cancel", job_id: jobId });
+	await vi.waitFor(() => expect(h.fake.widgets.has("bash-guard-background")).toBe(false));
+	await new Promise((resolve) => setTimeout(resolve, 1200));
+	expect(h.fake.renders.count).toBe(before);
+});
+
+it("renders a static block when --bash-bg-animation is off", async () => {
+	const h = await harness({ animation: "off" });
+	const ack = await h.call("bash", { command: idle, background: true });
+	const jobId = (ack.structuredContent as { job_id: string }).job_id;
+	const block = h.renderBlock("call-1", { content: [], details: undefined, structuredContent: { status: "running", job_id: jobId } } as never);
+	const first = block.lines().join("\n");
+	expect(first).toContain("running · 0:00");
+	await new Promise((resolve) => setTimeout(resolve, 1200));
+	expect(block.lines().join("\n")).toBe(first);
+	expect(block.invalidate).not.toHaveBeenCalled();
+	await h.call("bash_jobs", { action: "cancel", job_id: jobId });
+});
+
+it("leaves ordinary foreground results to the native renderer", async () => {
+	const h = await harness();
+	const base = { renderCall: () => ({ render: () => [] }), renderResult: vi.fn(() => ({ render: () => ["native"] })) };
+	const decorated = h.resolver()("bash", () => base as never)!;
+	const component = decorated.renderResult!(
+		{ content: [], details: undefined, structuredContent: { output: "hi", exit_code: 0 } } as never,
+		{ expanded: false, isPartial: false },
+		theme as never,
+		{ toolCallId: "plain", state: {}, invalidate: vi.fn(), executionStarted: true } as never,
+	);
+	expect(base.renderResult).toHaveBeenCalledOnce();
+	expect((component as { render(width: number): string[] }).render(80)).toEqual(["native"]);
+});
+
+it("stops refreshing a block once it settles, so no idle repaint loop remains", async () => {
+	const h = await harness();
+	const ack = await h.call("bash", { command: idle, background: true });
+	const jobId = (ack.structuredContent as { job_id: string }).job_id;
+	const block = h.renderBlock("call-1", { content: [], details: undefined, structuredContent: { status: "running", job_id: jobId } } as never);
+	await new Promise((resolve) => setTimeout(resolve, 1100));
+	expect(block.invalidate).toHaveBeenCalled();
+	// Settle, then confirm no further invalidation and another job still refreshes.
+	await h.call("bash_jobs", { action: "cancel", job_id: jobId });
+	await vi.waitFor(() => expect(block.lines().join("\n")).toContain("cancelled"));
+	const settled = block.invalidate.mock.calls.length;
+	const second = await h.call("bash", { command: idle, background: true });
+	await new Promise((resolve) => setTimeout(resolve, 1200));
+	expect(block.invalidate.mock.calls.length).toBe(settled);
+	await h.call("bash_jobs", { action: "cancel", job_id: (second.structuredContent as { job_id: string }).job_id });
+});
+
+it("renders no widget outside a TUI", async () => {
+	const h = await harness({ ui: false });
+	const ack = await h.call("bash", { command: idle, background: true });
+	expect(h.fake.widgets.size).toBe(0);
+	// The job still exists and stays discoverable through bash_jobs.
+	const status = await h.call("bash_jobs", { action: "status", job_id: (ack.structuredContent as { job_id: string }).job_id });
+	expect((status.structuredContent as { jobs: { state: string }[] }).jobs[0]!.state).toBe("running");
+	await h.call("bash_jobs", { action: "cancel", job_id: (ack.structuredContent as { job_id: string }).job_id });
+});

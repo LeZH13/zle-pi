@@ -8,6 +8,7 @@ function getResolver(): Resolver {
 	let resolver: Resolver | undefined;
 	const pi = {
 		registerFlag: vi.fn(),
+		registerTool: vi.fn(),
 		registerToolRenderer: (value: Resolver) => { resolver = value; },
 		on: vi.fn(),
 		registerCommand: vi.fn(),
