@@ -67,12 +67,12 @@ async function harness(options: { watchdog?: boolean; after?: string } = {}) {
 	});
 	await emit("session_start");
 	let nextId = 0;
-	async function call(name: string, params: Record<string, unknown>, signal?: AbortSignal) {
+	async function call(name: string, params: Record<string, unknown>, signal?: AbortSignal, parentToolCallId?: string) {
 		const id = `call-${++nextId}`;
 		const tool = tools.get(name)!;
 		expect(Value.Check(tool.parameters, params)).toBe(true);
 		for (const handler of handlers.get("tool_call") ?? []) {
-			const outcome = await handler({ type: "tool_call", toolName: name, toolCallId: id, input: params }, ctx) as { block?: boolean; reason?: string } | undefined;
+			const outcome = await handler({ type: "tool_call", toolName: name, toolCallId: id, parentToolCallId, input: params }, ctx) as { block?: boolean; reason?: string } | undefined;
 			if (outcome?.block) throw new Error(outcome.reason);
 		}
 		const result = await tool.execute(id, params, signal, undefined, ctx as Parameters<ToolDefinition["execute"]>[4]);
@@ -105,6 +105,29 @@ it("automatically backgrounds a native command, retains watchdog tracking, and e
 	expect(ack.structuredContent).toMatchObject({ status: "running" });
 	await vi.waitFor(() => expect(h.sendMessage).toHaveBeenCalledTimes(1), WAIT);
 	expect(h.sendMessage.mock.calls[0]![0].details).toMatchObject({ state: "failed", output: expect.stringContaining("timed out") });
+});
+
+it.each([undefined, false])("waits for nested bash output past the automatic threshold with background=%s", async (background) => {
+	const h = await harness({ after: "0.01" });
+	const result = await h.call("bash", {
+		command: command('setTimeout(() => console.log("nested finished"), 100)'),
+		...(background === undefined ? {} : { background }),
+	}, undefined, "codemode-call");
+	expect(result.structuredContent).toMatchObject({ output: "nested finished\n", exit_code: 0 });
+	expect(h.sendMessage).not.toHaveBeenCalled();
+	expect((await h.call("bash_jobs", { action: "list" })).structuredContent).toEqual({ jobs: [] });
+});
+
+it("preserves explicit backgrounding for nested bash calls", async () => {
+	const h = await harness({ after: "0.01" });
+	const controller = new AbortController();
+	const result = await h.call("bash", {
+		command: command('setTimeout(() => console.log("nested background finished"), 100)'), background: true,
+	}, controller.signal, "codemode-call");
+	expect(result.structuredContent).toMatchObject({ status: "running", job_id: expect.any(String) });
+	controller.abort();
+	await vi.waitFor(() => expect(h.sendMessage).toHaveBeenCalledTimes(1), WAIT);
+	expect(h.sendMessage.mock.calls[0]![0].details).toMatchObject({ state: "completed", output: "nested background finished\n", exit_code: 0 });
 });
 
 it("lets the watchdog terminate a background command after the original tool returns", async () => {

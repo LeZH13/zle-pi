@@ -30,11 +30,12 @@ await tools.bash({ command: "git status", background: false });
 ```
 
 - `background: true` returns immediately. A running acknowledgement is not a successful command result.
-- Omit `background` to wait normally, automatically yielding after **60 seconds** if still running. The command is not restarted.
+- For direct `bash` calls, omit `background` to wait normally, automatically yielding after **60 seconds** if still running. The command is not restarted.
+- **Changed in 0.6.2:** nested calls, including codemode's `tools.bash()`, wait for completed output by default, even past the automatic threshold. This keeps scripts that consume `output` and `exit_code` from unexpectedly receiving a running acknowledgement. Explicit `background: true` still backgrounds immediately; use it only when subsequent code does not need completed output. Codemode's own deadline and cancellation still apply while waiting.
 - `background: false` forces foreground execution, even past the automatic threshold.
 - Use `--bash-background-after 10` to change the threshold for an invocation, or `--bash-background-after 0` to disable automatic backgrounding. Explicit `background: true` still works.
 - `timeout` retains Pi's native meaning: seconds from execution start, with no default deadline. Backgrounding does not reset or remove an explicit deadline.
-- Foreground completion, nonzero exits, errors, rendering, and programmatic results retain native behavior. **Behavior change:** an ordinary command lasting past the threshold now returns a running acknowledgement rather than its final output. Scripts must handle that shape, or pass `background: false`.
+- Foreground completion, nonzero exits, errors, rendering, and programmatic results retain native behavior. **Behavior change:** a direct command lasting past the threshold now returns a running acknowledgement rather than its final output. Scripts must handle that shape, or pass `background: false`.
 
 When a job finishes, a `bash-guard-background` custom message reports its ID, command preview, final state, exit code when available, and a bounded output tail (4 KiB / 40 lines) — never the full accumulated output. It is queued as steering while busy and triggers a turn when idle. The agent should continue independent work, or end its turn if nothing remains; it should not poll or rerun the command.
 

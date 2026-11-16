@@ -191,7 +191,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let runtimeReady = false;
 	// Pi announces tool_execution_start before approval. Only our execute
 	// wrapper marks a call as actually running; renderer state survives map cleanup.
-	type ExecutionTiming = { started: boolean; durationMs?: number };
+	type ExecutionTiming = { started: boolean; durationMs?: number; nested?: boolean };
 	const executions = new Map<string, ExecutionTiming>();
 	const renderExecutions = new WeakMap<object, ExecutionTiming>();
 
@@ -466,10 +466,10 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		const bash = createBashToolDefinition(cwd, { operations });
 		pi.registerTool({
 			...bash,
-			description: `${bash.description}\nSet background:true to return immediately and continue other work. Unspecified background yields after 60s by default; background:false forces foreground. Completion arrives automatically; do not poll. Background commands retain timeout and watchdog enforcement.`,
+			description: `${bash.description}\nSet background:true to return immediately and continue other work. Unspecified background yields after 60s for direct calls; nested calls (including codemode) wait for completed output by default. background:false forces foreground. Inside codemode, use background:true only when subsequent code does not need completed output. Completion arrives automatically; do not poll. Background commands retain timeout and watchdog enforcement.`,
 			parameters: Type.Object({
 				...bash.parameters.properties,
-				background: Type.Optional(Type.Boolean({ description: "true: background immediately; false: force foreground; omitted: automatic backgrounding" })),
+				background: Type.Optional(Type.Boolean({ description: "true: background immediately; false: force foreground; omitted: automatic backgrounding for direct calls, foreground for nested/codemode calls" })),
 			}),
 			outputSchema: Type.Union([bash.outputSchema!, Type.Object({ status: Type.Literal("running"), job_id: Type.String() })]),
 			execute: async (toolCallId, params, signal, onUpdate, ctx) => {
@@ -483,7 +483,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 					}
 					const { background: requested, ...nativeParams } = params;
 					return await background.execute({
-						command: params.command, background: requested, afterMs: afterSec * 1000, signal, onUpdate,
+						command: params.command, background: requested ?? (timing.nested ? false : undefined), afterMs: afterSec * 1000, signal, onUpdate,
 						run: (jobSignal, update) => createBashToolDefinition(ctx.cwd, { operations }).execute(toolCallId, nativeParams, jobSignal, update, ctx),
 					});
 				} finally {
@@ -639,6 +639,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
 		if (!isToolCallEventType("bash", event)) return undefined;
+		executionState(event.toolCallId).nested = event.parentToolCallId !== undefined;
 		if (!guardOn()) return undefined;
 		const outcome = await runGuard(guardDeps(ctx), {
 			command: event.input.command,
