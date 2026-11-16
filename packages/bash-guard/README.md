@@ -37,7 +37,9 @@ await tools.bash({ command: "git status", background: false });
 - `timeout` retains Pi's native meaning: seconds from execution start, with no default deadline. Backgrounding does not reset or remove an explicit deadline.
 - Foreground completion, nonzero exits, errors, rendering, and programmatic results retain native behavior. **Behavior change:** a direct command lasting past the threshold now returns a running acknowledgement rather than its final output. Scripts must handle that shape, or pass `background: false`.
 
-When a job finishes, a `bash-guard-background` custom message reports its ID, command preview, final state, exit code when available, and a bounded output tail (4 KiB / 40 lines) — never the full accumulated output. It is queued as steering while busy and triggers a turn when idle. The agent should continue independent work, or end its turn if nothing remains; it should not poll or rerun the command.
+When a job finishes, a `bash-guard-background` custom message reports its ID, command preview, final state, exit code when available, and Pi's native model-facing output. There is no additional background-output cap: Pi retains up to 2,000 lines / 50 KiB, and saves full output to a temporary file when its native limit is exceeded. It is queued as steering while busy and triggers a turn when idle. The agent should continue independent work, or end its turn if nothing remains; it should not poll or rerun the command.
+
+**Fixed in 0.6.3:** completion messages are collapsed to a compact status and single-line command preview. Press `ctrl+o` to expand the native output. The extra 40-line / 4-KiB background cap has been removed; background completions preserve Pi's native output and truncation notice. UI collapse only changes presentation; the agent still receives the completion payload. Live transcript blocks identify jobs through renderer-visible result details.
 
 ### Seeing what is running
 
@@ -72,7 +74,7 @@ await tools.bash_jobs({ action: "cancel", job_id: "bg-..." });
 // { jobs: [...] }
 ```
 
-Lists omit output; `status` returns the latest bounded native output snapshot, capped at 40 lines / 4 KiB. A `truncated` flag discloses omitted output. If Pi retained full output, `full_output_path` points to its native file; use `read` to inspect it. No full-output file is promised for short output. Jobs transition through `running`, `cancelling`, `completed`, `failed`, or `cancelled`. Cancel uses Pi's native abort/process-tree cleanup, not graceful service shutdown. Watchdog kills and timeouts report `failed` with their reason.
+Lists omit output; `status` returns the latest native model-facing output snapshot without additional truncation. The `truncated` flag reflects Pi's native model-facing output limit (2,000 lines / 50 KiB). If Pi retained full output, `full_output_path` points to its native file; use `read` to inspect it. No full-output file is needed for output within Pi's limits. Jobs transition through `running`, `cancelling`, `completed`, `failed`, or `cancelled`. Cancel uses Pi's native abort/process-tree cleanup, not graceful service shutdown. Watchdog kills and timeouts report `failed` with their reason.
 
 ### Stopping a job yourself
 

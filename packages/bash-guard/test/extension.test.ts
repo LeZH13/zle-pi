@@ -155,6 +155,7 @@ function makeHarness(
 		getFlag: (name: string) => flags.get(name),
 		registerTool: (definition: { name: string; execute: BashExecute } & ToolRenderers) => tools.push({ name: definition.name, definition }),
 		registerToolRenderer: (resolver: ToolRendererResolver) => { rendererResolver = resolver; },
+		registerMessageRenderer: vi.fn(),
 		registerCommand: (name: string, config: { handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>; getArgumentCompletions?: (prefix: string) => unknown }) => {
 			commands.set(name, config.handler);
 			complete = config.getArgumentCompletions;

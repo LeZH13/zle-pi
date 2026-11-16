@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout, clearTimeout } from "node:timers";
-import { truncateTail, type createBashToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 
-export type BashResult = Awaited<ReturnType<ReturnType<typeof createBashToolDefinition>["execute"]>>;
+type NativeBashResult = Awaited<ReturnType<ReturnType<typeof createBashToolDefinition>["execute"]>>;
+export type BashResult = Omit<NativeBashResult, "details"> & {
+	details: NativeBashResult["details"] & { bashGuardBackground?: { status: "running"; job_id: string } } | undefined;
+};
 export type JobState = "running" | "cancelling" | "completed" | "failed" | "cancelled";
 export type JobSnapshot = {
 	job_id: string;
@@ -132,7 +135,7 @@ export class BackgroundBash {
 			this.emit(job);
 			return {
 				content: [{ type: "text", text: `Background job ${job.id} is running. Continue other work; its result arrives automatically. Do not poll or rerun it. Use bash_jobs to inspect or cancel. If nothing else remains, end your turn.` }],
-				details: undefined,
+				details: { bashGuardBackground: { status: "running", job_id: job.id } },
 				structuredContent: { status: "running", job_id: job.id },
 			};
 		} finally {
@@ -208,12 +211,11 @@ export class BackgroundBash {
 
 function snapshot(result: BashResult): Job["snapshot"] {
 	const text = result.content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-	const tail = truncateTail(text, { maxBytes: 4096, maxLines: 40 });
-	const data = result.structuredContent as { exit_code?: number; full_output_path?: string; truncated?: boolean } | undefined;
+	const data = result.structuredContent as { exit_code?: number; full_output_path?: string } | undefined;
 	const fullOutputPath = data?.full_output_path ?? result.details?.fullOutputPath;
 	return {
-		output: tail.content,
-		truncated: tail.truncated || data?.truncated === true || result.details?.truncation?.truncated === true,
+		output: text,
+		truncated: result.details?.truncation?.truncated === true,
 		...(data?.exit_code !== undefined ? { exit_code: data.exit_code } : {}),
 		...(fullOutputPath ? { full_output_path: fullOutputPath } : {}),
 	};

@@ -34,13 +34,14 @@ import {
 	getAgentDir,
 	isBashToolResult,
 	isToolCallEventType,
+	keyHint,
 	type BashOperations,
 	type ExtensionAPI,
 	type ExtensionUIContext,
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Container, Text, truncateToWidth, type AutocompleteItem, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { Box, Container, Text, truncateToWidth, type AutocompleteItem, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { BackgroundBash, type JobSnapshot } from "../src/background.js";
 import {
@@ -110,24 +111,37 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		type: "string",
 		default: "clock",
 	});
+	pi.registerMessageRenderer<JobSnapshot>("bash-guard-background", (message, { expanded, outputPad }, theme) => {
+		const job = message.details;
+		if (!job) return undefined;
+		const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
+		if (expanded && typeof message.content === "string") {
+			box.addChild(new Text(message.content, 0, 0));
+		} else {
+			const styler = jobStyler(theme);
+			box.addChild({
+				invalidate() {},
+				render: (width: number) => [
+					truncateToWidth(`Background bash ${job.job_id}: ${renderJobLine(job, styler)}`, width),
+					truncateToWidth(styler(job.command.replace(/\s+/g, " ").trim(), "muted"), width),
+					truncateToWidth(keyHint("app.tools.expand", "to expand output"), width),
+				],
+			});
+		}
+		return box;
+	});
 	const background = new BackgroundBash(notifySettle);
 	/**
 	 * Deliver a completion to the agent. The model sees the job's state, its
-	 * bounded output tail, and where full output lives; `details` carries the
+	 * native output and truncation notice; `details` carries the
 	 * whole snapshot for the transcript renderer.
 	 */
 	function notifySettle(job: JobSnapshot): void {
-		const tail = job.output.trim() === "" ? "(no output)" : job.output;
-		const truncated = job.truncated
-			? job.full_output_path
-				? "\n[output is a bounded tail; read the full output file below for the rest]"
-				: "\n[output is a bounded tail; earlier output omitted]"
-			: "";
-		const where = job.full_output_path ? `\nFull output: ${job.full_output_path}` : "";
+		const output = job.output.trim() === "" ? "(no output)" : job.output;
 		try {
 			pi.sendMessage({
 				customType: "bash-guard-background",
-				content: `Background bash ${job.job_id}: ${job.state} after ${job.wall_time_seconds.toFixed(1)}s\n${job.command}\n${tail}${truncated}${where}`,
+				content: `Background bash ${job.job_id}: ${job.state} after ${job.wall_time_seconds.toFixed(1)}s\n${job.command}\n${output}`,
 				details: job,
 				display: true,
 			}, { deliverAs: "steer", triggerTurn: true });
@@ -143,7 +157,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	});
 	pi.registerTool({
 		name: "bash_jobs", label: "Bash jobs",
-		description: "List, inspect, or cancel background bash jobs. Completion arrives automatically; do not poll. Output is a bounded tail; read full_output_path when present for full output.",
+		description: "List, inspect, or cancel background bash jobs. Completion arrives automatically; do not poll. Output follows Pi's native truncation; read full_output_path when present for full output.",
 		parameters: Type.Object({ action: StringEnum(["list", "status", "cancel"]), job_id: Type.Optional(Type.String()) }),
 		outputSchema: Type.Object({ jobs: Type.Array(jobSchema) }),
 		async execute(_id, { action, job_id }) {
@@ -595,9 +609,9 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	});
 
 	/** The job id behind a background acknowledgement, or undefined for a normal result. */
-	function backgroundJobId(result: { structuredContent?: unknown }, options: { isPartial: boolean }): string | undefined {
+	function backgroundJobId(result: { details?: unknown }, options: { isPartial: boolean }): string | undefined {
 		if (options.isPartial) return undefined;
-		const data = result.structuredContent as { status?: unknown; job_id?: unknown } | undefined;
+		const data = (result.details as { bashGuardBackground?: { status?: unknown; job_id?: unknown } } | undefined)?.bashGuardBackground;
 		return data?.status === "running" && typeof data.job_id === "string" ? data.job_id : undefined;
 	}
 

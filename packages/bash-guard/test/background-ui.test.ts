@@ -1,9 +1,10 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { ExtensionAPI, ExtensionContext, ToolDefinition, ToolRendererResolver } from "@earendil-works/pi-coding-agent";
+import { initTheme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition, ToolRendererResolver, MessageRenderer } from "@earendil-works/pi-coding-agent";
 import bashGuard from "../extensions/index.js";
 
 const cleanup: (() => Promise<void>)[] = [];
@@ -13,7 +14,7 @@ afterEach(async () => {
 	vi.useRealTimers();
 });
 
-const theme = { fg: (_kind: string, text: string) => text };
+const theme = { fg: (_kind: string, text: string) => text, bg: (_kind: string, text: string) => text };
 
 /** A UI context that records widget mounts and forces a redraw on demand. */
 function fakeUi() {
@@ -55,6 +56,7 @@ async function harness(options: { after?: string; animation?: string; ui?: boole
 	type Handler = (event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown;
 	const handlers = new Map<string, Handler[]>();
 	let resolver: ToolRendererResolver | undefined;
+	const messageRenderers = new Map<string, MessageRenderer>();
 	const fake = fakeUi();
 	const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
 	const shortcuts = new Map<string, (ctx: ExtensionContext) => Promise<void>>();
@@ -63,6 +65,7 @@ async function harness(options: { after?: string; animation?: string; ui?: boole
 		getFlag: (name: string) => flags.get(name),
 		registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
 		registerToolRenderer: (value: ToolRendererResolver) => { resolver = value; },
+		registerMessageRenderer: (name: string, renderer: MessageRenderer) => messageRenderers.set(name, renderer),
 		registerCommand: (name: string, config: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => { commands.set(name, config.handler); },
 		registerShortcut: (shortcut: string, config: { handler: (ctx: ExtensionContext) => Promise<void> }) => { shortcuts.set(shortcut, config.handler); },
 		on: (name: string, handler: Handler) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
@@ -88,19 +91,19 @@ async function harness(options: { after?: string; animation?: string; ui?: boole
 		return tool.execute(`call-${++nextId}`, params, undefined, undefined, ctx as never);
 	}
 	/** Render the block for a background acknowledgement through the real resolver. */
-	function renderBlock(toolCallId: string, result: { content: never[]; details: undefined; structuredContent?: unknown }, state = {}) {
+	function renderBlock(toolCallId: string, result: { content: unknown; details: unknown }, state = {}) {
 		const base = { renderCall: () => ({ render: () => [] }), renderResult: () => ({ render: () => [] }) };
 		const renderers = resolver!("bash", () => base as never)!;
 		const invalidate = vi.fn();
 		const component = renderers.renderResult!(
-			result as never,
+			{ content: result.content, details: result.details } as never,
 			{ expanded: false, isPartial: false },
 			theme as never,
 			{ toolCallId, state, invalidate, executionStarted: true } as never,
 		) as { render(width: number): string[] };
 		return { component, invalidate, lines: () => component.render(200).map((line) => line.trim()).filter(Boolean) };
 	}
-	return { call, emit, fake, renderBlock, tools, ctx, commands, shortcuts, messages: pi.sendMessage as ReturnType<typeof vi.fn>, resolver: () => resolver! };
+	return { call, emit, fake, renderBlock, messageRenderers, tools, ctx, commands, shortcuts, messages: pi.sendMessage as ReturnType<typeof vi.fn>, resolver: () => resolver! };
 }
 
 it("toggles the job dropdown on header clicks and through the keyboard command", async () => {
@@ -130,23 +133,51 @@ it("toggles the job dropdown on header clicks and through the keyboard command",
 	expect(h.fake.widgets.get("bash-guard-background")!(h.fake.tui, theme).render(200)).toHaveLength(1);
 });
 
-it.each([60, 20000])("reports truncated output honestly for %i lines", async (count) => {
+it.each([60, 20000])("preserves native output and truncation for %i lines", async (count) => {
 	const h = await harness();
 	const command = `${JSON.stringify(process.execPath)} -e 'for(let i=0;i<${count};i++) console.log("line "+i)'`;
 	await h.call("bash", { command, background: true });
 	await vi.waitFor(() => expect(h.messages).toHaveBeenCalled(), { timeout: 5000 });
 	const message = h.messages.mock.calls[0]![0];
-	expect(message.details.truncated).toBe(true);
+	const complete = Array.from({ length: count }, (_, i) => `line ${i}\n`).join("");
+	expect(message.content).not.toContain("output is a bounded tail");
 	if (count === 60) {
+		expect(message.details.truncated).toBe(false);
+		expect(message.details.output).toBe(complete);
+		expect(message.content).toContain(complete);
 		expect(message.details.full_output_path).toBeUndefined();
-		expect(message.content).toContain("earlier output omitted");
-		expect(message.content).not.toContain("full_output_path");
 		expect(message.content).not.toContain("Full output:");
 	} else {
+		expect(message.details.truncated).toBe(true);
 		expect(message.details.full_output_path).toBeTruthy();
 		expect(message.content).toContain(`Full output: ${message.details.full_output_path}`);
-		expect(message.content).toContain("read the full output file below");
+		expect(message.content).toContain(`line ${count - 2000}\n`);
+		expect(message.content).toContain(`line ${count - 1}\n`);
+		expect(readFileSync(message.details.full_output_path, "utf8")).toBe(complete);
 	}
+});
+
+it("collapses completion messages at narrow widths and expands their native output", async () => {
+	initTheme("dark", false);
+	const h = await harness();
+	await h.call("bash", {
+		command: `${JSON.stringify(process.execPath)} -e 'console.log("OUTPUT_MARKER".repeat(300))'`,
+		background: true,
+	});
+	await vi.waitFor(() => expect(h.messages).toHaveBeenCalled(), { timeout: 5000 });
+	const message = h.messages.mock.calls[0]![0];
+	const renderer = h.messageRenderers.get("bash-guard-background")!;
+	const collapsed = renderer(message, { expanded: false, outputPad: 1 }, theme as never)!;
+	for (const width of [40, 100]) {
+		const lines = collapsed.render(width);
+		expect(lines.length).toBeLessThanOrEqual(5);
+		expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
+		expect(lines.join("\n")).toContain("to expand output");
+		expect(lines.join("\n")).not.toContain("OUTPUT_MARKER".repeat(5));
+	}
+	const expanded = renderer(message, { expanded: true, outputPad: 1 }, theme as never)!;
+	expect(expanded.render(100).join("\n")).toContain("OUTPUT_MARKER".repeat(5));
+	expect(message.content).toContain("OUTPUT_MARKER".repeat(5));
 });
 
 const idle = `${JSON.stringify(process.execPath)} -e 'setInterval(() => {}, 1000)'`;
@@ -168,8 +199,7 @@ it("keeps a running block's clock live and settles it in place", async () => {
 	const h = await harness();
 	const ack = await h.call("bash", { command: idle, background: true });
 	const jobId = (ack.structuredContent as { job_id: string }).job_id;
-	const result = { content: [], details: undefined, structuredContent: { status: "running", job_id: jobId } };
-	const block = h.renderBlock("call-1", result as never);
+	const block = h.renderBlock("call-1", ack);
 	expect(block.lines().join("\n")).toBe(`● running · 0:00 · ${jobId}`);
 
 	// The shared ticker advances the clock without any new tool result.
@@ -197,7 +227,7 @@ it("renders a static block when --bash-bg-animation is off", async () => {
 	const h = await harness({ animation: "off" });
 	const ack = await h.call("bash", { command: idle, background: true });
 	const jobId = (ack.structuredContent as { job_id: string }).job_id;
-	const block = h.renderBlock("call-1", { content: [], details: undefined, structuredContent: { status: "running", job_id: jobId } } as never);
+	const block = h.renderBlock("call-1", ack);
 	const first = block.lines().join("\n");
 	expect(first).toContain("running · 0:00");
 	await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -220,11 +250,26 @@ it("leaves ordinary foreground results to the native renderer", async () => {
 	expect((component as { render(width: number): string[] }).render(80)).toEqual(["native"]);
 });
 
+it.each([true, false, undefined])("preserves native output collapse regardless of background=%s", async (background) => {
+	initTheme("dark", false);
+	const h = await harness();
+	const base = h.tools.get("bash")!;
+	const decorated = h.resolver()("bash", () => base)!;
+	const result = { content: [{ type: "text" as const, text: "output line\n".repeat(100) }], details: undefined };
+	const context = { toolCallId: "native", args: { command: "test", background }, state: {}, invalidate: vi.fn(), executionStarted: false };
+	const collapsed = decorated.renderResult!(result, { expanded: false, isPartial: false }, theme as never, context as never);
+	const lines = collapsed.render(80);
+	expect(lines.length).toBeLessThanOrEqual(8);
+	expect(lines.join("\n")).toContain("to expand");
+	const expanded = decorated.renderResult!(result, { expanded: true, isPartial: false }, theme as never, context as never);
+	expect(expanded.render(80).length).toBeGreaterThanOrEqual(100);
+});
+
 it("stops refreshing a block once it settles, so no idle repaint loop remains", async () => {
 	const h = await harness();
 	const ack = await h.call("bash", { command: idle, background: true });
 	const jobId = (ack.structuredContent as { job_id: string }).job_id;
-	const block = h.renderBlock("call-1", { content: [], details: undefined, structuredContent: { status: "running", job_id: jobId } } as never);
+	const block = h.renderBlock("call-1", ack);
 	await new Promise((resolve) => setTimeout(resolve, 1100));
 	expect(block.invalidate).toHaveBeenCalled();
 	// Settle, then confirm no further invalidation and another job still refreshes.

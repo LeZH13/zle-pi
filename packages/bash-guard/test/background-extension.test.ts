@@ -52,6 +52,7 @@ async function harness(options: { watchdog?: boolean; after?: string } = {}) {
 		getFlag: (name: string) => flags.get(name),
 		registerTool: (tool: ToolDefinition) => tools.set(tool.name, tool),
 		registerToolRenderer: vi.fn(), registerCommand: vi.fn(), registerShortcut: vi.fn(),
+		registerMessageRenderer: vi.fn(),
 		on: (name: string, handler: Handler) => handlers.set(name, [...(handlers.get(name) ?? []), handler]),
 		getAllTools: () => [...tools.values()].map((tool) => ({ name: tool.name, sourceInfo: { path: "/pi-bash-guard/extensions/index.ts" } })),
 		exec: async () => ({ code: 1, stdout: "", stderr: "" }),

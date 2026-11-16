@@ -41,6 +41,7 @@ describe("background bash scheduling", () => {
 		const pending = deferred();
 		const ack = await jobs.execute({ command: "test", background: true, afterMs: 0, run: () => pending.promise });
 		expect(ack.structuredContent).toMatchObject({ status: "running", job_id: expect.stringMatching(/^bg-/) });
+		expect(ack.details).toEqual({ bashGuardBackground: ack.structuredContent });
 		const id = jobs.list()[0]!.job_id;
 		pending.resolve(result());
 		await flush();
@@ -130,7 +131,7 @@ describe("background bash scheduling", () => {
 		expect(notices[1]!.output).toContain("timed out");
 	});
 
-	it("bounds output and history, retains native full-output paths, and lists compactly", async () => {
+	it("preserves native output, bounds history, retains full-output paths, and lists compactly", async () => {
 		const notify = vi.fn();
 		const jobs = new BackgroundBash(notify);
 		for (let i = 0; i < 25; i++) {
@@ -140,8 +141,8 @@ describe("background bash scheduling", () => {
 		expect(jobs.list()).toHaveLength(20);
 		expect(jobs.list()[0]!.output).toBe("");
 		const job = jobs.list(jobs.list()[0]!.job_id)[0]!;
-		expect(Buffer.byteLength(job.output)).toBeLessThanOrEqual(4096);
-		expect(job.truncated).toBe(true);
+		expect(job.output).toBe("x".repeat(20_000));
+		expect(job.truncated).toBe(false);
 		expect(job.full_output_path).toBe("/tmp/native-output");
 	});
 
