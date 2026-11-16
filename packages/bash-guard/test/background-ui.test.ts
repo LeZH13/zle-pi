@@ -17,7 +17,10 @@ const theme = { fg: (_kind: string, text: string) => text };
 
 /** A UI context that records widget mounts and forces a redraw on demand. */
 function fakeUi() {
-	const widgets = new Map<string, (tui: unknown, theme: unknown) => { render(width: number): string[] }>();
+	const widgets = new Map<string, (tui: unknown, theme: unknown) => {
+		render(width: number): string[];
+		handleMouse(event: { type: string; button?: string; y: number }): { handled: boolean } | undefined;
+	}>();
 	const renders = { count: 0 };
 	const confirms: unknown[][] = [];
 	const state = { confirmAnswer: true, selectAnswer: undefined as string | undefined };
@@ -97,9 +100,54 @@ async function harness(options: { after?: string; animation?: string; ui?: boole
 		) as { render(width: number): string[] };
 		return { component, invalidate, lines: () => component.render(200).map((line) => line.trim()).filter(Boolean) };
 	}
-	return { call, emit, fake, renderBlock, tools, ctx, commands, shortcuts, resolver: () => resolver! };
+	return { call, emit, fake, renderBlock, tools, ctx, commands, shortcuts, messages: pi.sendMessage as ReturnType<typeof vi.fn>, resolver: () => resolver! };
 }
 
+it("toggles the job dropdown on header clicks and through the keyboard command", async () => {
+	const h = await harness();
+	await h.call("bash", { command: idle, background: true });
+	await h.call("bash", { command: idle, background: true });
+	const widget = h.fake.widgets.get("bash-guard-background")!(h.fake.tui, theme);
+	expect(widget.render(200)).toHaveLength(1);
+	for (const event of [
+		{ type: "click", button: "right", y: 0 },
+		{ type: "press", button: "left", y: 0 },
+		{ type: "wheel", y: 0 },
+		{ type: "click", button: "left", y: 1 },
+	]) expect(widget.handleMouse(event)).toBeUndefined();
+	expect(widget.render(200)).toHaveLength(1);
+	expect(widget.handleMouse({ type: "click", button: "left", y: 0 })).toEqual({ handled: true });
+	expect(widget.render(200)).toHaveLength(3);
+	expect(widget.render(200)[0]).toContain("▾ 2 bg");
+	expect(widget.render(200)[1]).toContain("running");
+	expect(widget.render(200)[1]).toContain("setInterval");
+	widget.handleMouse({ type: "click", button: "left", y: 0 });
+	expect(widget.render(200)).toHaveLength(1);
+	await h.commands.get("bash-jobs")!("toggle", h.ctx);
+	expect(widget.render(200)).toHaveLength(3);
+	await h.emit("session_before_switch");
+	await h.call("bash", { command: idle, background: true });
+	expect(h.fake.widgets.get("bash-guard-background")!(h.fake.tui, theme).render(200)).toHaveLength(1);
+});
+
+it.each([60, 20000])("reports truncated output honestly for %i lines", async (count) => {
+	const h = await harness();
+	const command = `${JSON.stringify(process.execPath)} -e 'for(let i=0;i<${count};i++) console.log("line "+i)'`;
+	await h.call("bash", { command, background: true });
+	await vi.waitFor(() => expect(h.messages).toHaveBeenCalled(), { timeout: 5000 });
+	const message = h.messages.mock.calls[0]![0];
+	expect(message.details.truncated).toBe(true);
+	if (count === 60) {
+		expect(message.details.full_output_path).toBeUndefined();
+		expect(message.content).toContain("earlier output omitted");
+		expect(message.content).not.toContain("full_output_path");
+		expect(message.content).not.toContain("Full output:");
+	} else {
+		expect(message.details.full_output_path).toBeTruthy();
+		expect(message.content).toContain(`Full output: ${message.details.full_output_path}`);
+		expect(message.content).toContain("read the full output file below");
+	}
+});
 
 const idle = `${JSON.stringify(process.execPath)} -e 'setInterval(() => {}, 1000)'`;
 
@@ -110,7 +158,7 @@ it("mounts one aggregate widget row with the newest command while a job runs", a
 	expect(widget).toBeDefined();
 	const rows = widget!(h.fake.tui, theme).render(200);
 	expect(rows).toHaveLength(1);
-	expect(rows[0]).toMatch(/▶ 1 bg · 0:0\d/);
+	expect(rows[0]).toMatch(/▸ 1 bg · 0:0\d/);
 	expect(rows[0]).toContain("setInterval");
 	expect(visibleWidth(rows[0]!)).toBeLessThanOrEqual(200);
 	await h.call("bash_jobs", { action: "cancel", job_id: (ack.structuredContent as { job_id: string }).job_id });
@@ -122,11 +170,11 @@ it("keeps a running block's clock live and settles it in place", async () => {
 	const jobId = (ack.structuredContent as { job_id: string }).job_id;
 	const result = { content: [], details: undefined, structuredContent: { status: "running", job_id: jobId } };
 	const block = h.renderBlock("call-1", result as never);
-	expect(block.lines().join("\n")).toBe(`▶ running · 0:00 · ${jobId}`);
+	expect(block.lines().join("\n")).toBe(`● running · 0:00 · ${jobId}`);
 
 	// The shared ticker advances the clock without any new tool result.
 	await new Promise((resolve) => setTimeout(resolve, 1100));
-	expect(block.lines().join("\n")).toMatch(/▶ running · 0:0[12]/);
+	expect(block.lines().join("\n")).toMatch(/● running · 0:0[12]/);
 	expect(block.invalidate).toHaveBeenCalled();
 
 	await h.call("bash_jobs", { action: "cancel", job_id: jobId });
@@ -209,8 +257,8 @@ describe("operator cancellation", () => {
 		await shortcut!(h.ctx);
 		expect(h.fake.confirms).toHaveLength(1);
 		expect(h.fake.confirms[0]![0]).toContain("Cancel background job?");
-		await vi.waitFor(() => {
-			expect(h.call("bash_jobs", { action: "status", job_id: jobId })).resolves.toMatchObject({ structuredContent: { jobs: [{ state: expect.stringMatching(/cancel/) }] } });
+		await vi.waitFor(async () => {
+			await expect(h.call("bash_jobs", { action: "status", job_id: jobId })).resolves.toMatchObject({ structuredContent: { jobs: [{ state: expect.stringMatching(/cancel/) }] } });
 		});
 	});
 

@@ -44,19 +44,21 @@ A background acknowledgement is a *final* tool result, so Pi stops that block's 
 
 ```text
 ⛨ bash sleep 8; printf 'BACKGROUND_OK\n'  (timeout 20s)
-▶ running · 3s · bg-588d7673
+● running · 3s · bg-588d7673
 
 # the same block, after the job settles — no new block, no flash
 ⛨ bash sleep 8; printf 'BACKGROUND_OK\n'  (timeout 20s)
 ✓ completed · 8s · exit 0
 
 # above the editor, while any job runs
-▶ 2 bg · 12s │ 5m03s   npm start
+▸ 2 bg · 12s │ 5m03s   npm start
 ```
 
-State glyphs, identical in the block and the widget row: `▶` running, `◐` cancelling, `✓` completed, `✗` failed, `⊘` cancelled. A failed job names its cause (`timed out after 1s`, `exit 2`, or the watchdog's kill reason). A live job keeps its job ID; settled jobs drop it.
+Job state glyphs in transcript blocks and expanded widget entries: `●` running, `◐` cancelling, `✓` completed, `✗` failed, `⊘` cancelled. A failed job names its cause (`timed out after 1s`, `exit 2`, or the watchdog's kill reason). A live job keeps its job ID; settled jobs drop it.
 
-Motion is the advancing clock, not a spinner: the agent's working indicator already owns spinners in the transcript, and a second one would compete with it. The widget row shows the oldest │ newest elapsed plus the newest command, so 16 concurrent jobs still cost one line; it disappears when the last job settles. Nothing animates outside a TUI, and every ticker is disposed on settle, session change, and shutdown.
+In fullscreen mode, click the summary row to expand or collapse a dropdown of active jobs (state, elapsed time, ID, and command). The arrow changes from `▸` to `▾`; the list shows up to eight jobs plus a count of any remaining jobs. Use `/bash-jobs toggle` for the same interaction from the keyboard, including in regular terminal mode. Expansion stays put while jobs update and resets when the last job settles or the session changes. Cancellation still uses `/bash-jobs` or `ctrl+shift+k`.
+
+Motion is the advancing clock, not a spinner: the agent's working indicator already owns spinners in the transcript, and a second one would compete with it. The widget row shows the oldest │ newest elapsed plus the newest command, so 16 concurrent jobs still cost one line while collapsed; it disappears when the last job settles. Nothing animates outside a TUI, and every ticker is disposed on settle, session change, and shutdown.
 
 `--bash-bg-animation off` renders a static snapshot and stops the 1 Hz job tick. The watchdog footer clock is unaffected.
 

@@ -40,7 +40,7 @@ import {
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Container, Text, truncateToWidth, type AutocompleteItem, type TUI } from "@earendil-works/pi-tui";
+import { Container, Text, truncateToWidth, type AutocompleteItem, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { BackgroundBash, type JobSnapshot } from "../src/background.js";
 import {
@@ -118,7 +118,11 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	 */
 	function notifySettle(job: JobSnapshot): void {
 		const tail = job.output.trim() === "" ? "(no output)" : job.output;
-		const truncated = job.truncated ? "\n[output is a bounded tail; read full_output_path for the rest]" : "";
+		const truncated = job.truncated
+			? job.full_output_path
+				? "\n[output is a bounded tail; read the full output file below for the rest]"
+				: "\n[output is a bounded tail; earlier output omitted]"
+			: "";
 		const where = job.full_output_path ? `\nFull output: ${job.full_output_path}` : "";
 		try {
 			pi.sendMessage({
@@ -180,6 +184,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	/** One ticker drives the widget row and every running block's clock. */
 	let jobTick: ReturnType<typeof setInterval> | undefined;
 	let widgetMounted = false;
+	let widgetExpanded = false;
 	let tui: TUI | undefined;
 	const blockRefreshers = new Set<(() => void) & { jobId?: string }>();
 	const syncJobUi = (): void => syncBackgroundUi();
@@ -359,6 +364,11 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		for (const refresh of [...blockRefreshers]) refresh();
 	}
 
+	function toggleBackgroundWidget(): void {
+		widgetExpanded = !widgetExpanded;
+		tui?.requestRender(true);
+	}
+
 	/** Mount above the editor while jobs run; disappear when the last one settles. */
 	function syncBackgroundWidget(ctx?: ExtensionContext): void {
 		const sink = ctx?.hasUI ? ctx.ui : ui;
@@ -366,6 +376,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		if (!wanted) {
 			if (widgetMounted && sink) sink.setWidget(WIDGET_KEY, undefined);
 			widgetMounted = false;
+			widgetExpanded = false;
 			return;
 		}
 		if (!sink) return;
@@ -375,8 +386,14 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				const styler = jobStyler(theme);
 				return {
 					invalidate() {},
+					handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+						if (event.type === "click" && event.button === "left" && event.y === 0) {
+							toggleBackgroundWidget();
+							return { handled: true };
+						}
+					},
 					render(width: number): string[] {
-						const rows = renderWidgetLine(backgroundJobs(), styler, width);
+						const rows = renderWidgetLine(backgroundJobs(), styler, width, widgetExpanded);
 						return rows.map((row) => truncateToWidth(row, width));
 					},
 				};
@@ -401,6 +418,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		blockRefreshers.clear();
 		if (widgetMounted && ui) ui.setWidget(WIDGET_KEY, undefined);
 		widgetMounted = false;
+		widgetExpanded = false;
 		tui = undefined;
 	}
 
@@ -857,9 +875,12 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("bash-jobs", {
-		description: "List background bash jobs and cancel one",
-		handler: (args, ctx) => {
-			void args;
+		description: "Cancel a background bash job, or toggle the job list with /bash-jobs toggle",
+		handler: async (args, ctx) => {
+			if (args.trim() === "toggle") {
+				if (ctx.mode === "tui" && hasActiveJobs()) toggleBackgroundWidget();
+				return;
+			}
 			return cancelInteractively(ctx);
 		},
 	});

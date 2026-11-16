@@ -24,7 +24,7 @@ export interface StateStyle {
 }
 
 export const JOB_STYLES: Record<JobState, StateStyle> = {
-	running: { glyph: "▶", kind: "accent", active: true },
+	running: { glyph: "●", kind: "accent", active: true },
 	cancelling: { glyph: "◐", kind: "warning", active: true },
 	completed: { glyph: "✓", kind: "success", active: false },
 	failed: { glyph: "✗", kind: "error", active: false },
@@ -74,17 +74,26 @@ function jobDetail(job: JobSnapshot): string | undefined {
 }
 
 /**
- * The aggregate row above the editor: one line no matter how many commands run.
+ * The aggregate row above the editor, with a bounded job list when expanded.
  * `12s │ 5m03s` is oldest │ newest elapsed, which shows the spread at a glance.
  */
-export function renderWidgetLine(jobs: readonly JobSnapshot[], styler: JobStyler, width: number): string[] {
+export function renderWidgetLine(jobs: readonly JobSnapshot[], styler: JobStyler, width: number, expanded = false): string[] {
 	const active = jobs.filter((job) => isActive(job.state));
 	if (active.length === 0) return [];
-	const glyph = JOB_STYLES.running.glyph;
+	const glyph = expanded ? "▾" : "▸";
 	const spread = active.length === 1
 		? formatElapsed(active[0]!.wall_time_seconds)
 		: `${formatElapsed(active[0]!.wall_time_seconds)} │ ${formatElapsed(active[active.length - 1]!.wall_time_seconds)}`;
 	const head = `${styler(glyph, "accent")} ${styler(`${active.length} bg · ${spread}`, "accent")}`;
+	if (expanded) {
+		const rows = [truncateToWidth(head, width)];
+		for (const job of active.slice(0, 8)) {
+			const command = job.command.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim();
+			rows.push(truncateToWidth(`  ${renderJobLine(job, styler)}   ${styler(command, "muted")}`, width));
+		}
+		if (active.length > 8) rows.push(truncateToWidth(styler(`  +${active.length - 8} more`, "muted"), width));
+		return rows;
+	}
 	const newest = active[active.length - 1]!.command.replace(/\s+/g, " ").trim();
 	const plainHead = `${glyph} ${active.length} bg · ${spread}`;
 	// The command tail is decoration: drop it rather than squeeze the clock.

@@ -14,7 +14,7 @@ function job(overrides: Partial<JobSnapshot> = {}): JobSnapshot {
 
 describe("job state styles", () => {
 	it.each([
-		["running", true, "▶"],
+		["running", true, "●"],
 		["cancelling", true, "◐"],
 		["completed", false, "✓"],
 		["failed", false, "✗"],
@@ -31,7 +31,7 @@ describe("job state styles", () => {
 
 describe("renderJobLine", () => {
 	it("keeps the job id and advancing clock on a running job", () => {
-		expect(renderJobLine(job(), plain)).toBe("▶ running · 0:03 · bg-588d7673");
+		expect(renderJobLine(job(), plain)).toBe("● running · 0:03 · bg-588d7673");
 	});
 
 	it("drops the job id once settled in place", () => {
@@ -71,6 +71,19 @@ describe("renderJobLine", () => {
 });
 
 describe("renderWidgetLine", () => {
+	it("bounds expanded job rows and terminal columns", () => {
+		const jobs = Array.from({ length: 16 }, (_, i) => job({ job_id: `bg-${i}`, command: "界".repeat(100) }));
+		for (const width of [1, 10, 40, 80]) {
+			const rows = renderWidgetLine(jobs, plain, width, true);
+			expect(rows).toHaveLength(10);
+			for (const row of rows) expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+		}
+		const rows = renderWidgetLine(jobs, plain, 200, true);
+		expect(rows[0]).toContain("▾ 16 bg");
+		expect(rows.at(-1)).toContain("+8 more");
+		expect(renderWidgetLine([job({ state: "completed" })], plain, 80, true)).toEqual([]);
+	});
+
 	it("renders nothing when every job has settled", () => {
 		expect(renderWidgetLine([job({ state: "completed" })], plain, 80)).toEqual([]);
 		expect(renderWidgetLine([], plain, 80)).toEqual([]);
