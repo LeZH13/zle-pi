@@ -49,11 +49,15 @@ export interface WatchCheckRecord {
 	outcome: string;
 }
 
-/** Live view of the longest-running watched command, for the footer. */
+/** Live view of the highest-priority watched command, for the footer. */
 export interface WatchLive {
 	/** Commands currently watched. */
 	running: number;
-	/** Seconds since the longest-running command started. */
+	/** Running commands currently flagged stuck or looping (excluding services). */
+	warnings: number;
+	/** Command text of the spotlighted watched command. */
+	command: string;
+	/** Seconds since the spotlighted command started. */
 	elapsedSeconds: number;
 	/** Its latest Jev answer; unset before the first check or after a failed one. */
 	check?: {
@@ -177,14 +181,21 @@ export class Watchdog {
 		return this.entries.size;
 	}
 
-	/** The longest-running watched command, or undefined when none runs. */
+	/** The highest-priority watched command, or undefined when none runs. */
 	live(): WatchLive | undefined {
-		const oldest = this.entries.values().next().value; // Map keeps start order
-		if (!oldest) return undefined;
+		let focus: Entry | undefined;
+		let warnings = 0;
+		for (const entry of this.entries.values()) {
+			if (isWarningCheck(entry.lastCheck)) warnings++;
+			if (!focus || compareLivePriority(entry, focus) < 0) focus = entry;
+		}
+		if (!focus) return undefined;
 		return {
 			running: this.entries.size,
-			elapsedSeconds: Math.max(0, Math.floor((this.deps.now() - oldest.startedAt) / 1000)),
-			...(oldest.lastCheck ? { check: oldest.lastCheck } : {}),
+			warnings,
+			command: focus.command,
+			elapsedSeconds: Math.max(0, Math.floor((this.deps.now() - focus.startedAt) / 1000)),
+			...(focus.lastCheck ? { check: focus.lastCheck } : {}),
 		};
 	}
 
@@ -354,4 +365,35 @@ function tailForReport(tail: string): string {
 	if (!tail) return "";
 	const result = truncateTail(tail, { maxBytes: REPORT_TAIL_CHARS, maxLines: 60 });
 	return redactSecrets(result.content);
+}
+
+function isWarningCheck(check: Entry["lastCheck"]): boolean {
+	return check !== undefined && !check.service && (check.status === "stuck" || check.status === "looping");
+}
+
+function liveTier(check: Entry["lastCheck"]): number {
+	if (!check) return 0;
+	if (check.service) return 1;
+	if (check.agree > 0) return 4;
+	if (check.status === "stuck" || check.status === "looping") return 3;
+	return 2;
+}
+
+/** Negative when `a` should take priority over `b` in the footer spotlight. */
+function compareLivePriority(a: Entry, b: Entry): number {
+	const tierDiff = liveTier(b.lastCheck) - liveTier(a.lastCheck);
+	if (tierDiff !== 0) return tierDiff;
+	if (a.lastCheck && b.lastCheck) {
+		if (liveTier(a.lastCheck) === 4) {
+			const ratioDiff =
+				b.lastCheck.agree / Math.max(1, b.lastCheck.agreeNeeded) -
+				a.lastCheck.agree / Math.max(1, a.lastCheck.agreeNeeded);
+			if (ratioDiff !== 0) return ratioDiff;
+		}
+		if (liveTier(a.lastCheck) >= 3) {
+			const pDiff = b.lastCheck.p - a.lastCheck.p;
+			if (pDiff !== 0) return pDiff;
+		}
+	}
+	return a.startedAt - b.startedAt;
 }

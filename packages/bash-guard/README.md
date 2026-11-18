@@ -41,27 +41,29 @@ When a job finishes, a `bash-guard-background` custom message reports its ID, co
 
 **Fixed in 0.6.3:** completion messages are collapsed to a compact status and single-line command preview. Press `ctrl+o` to expand the native output. The extra 40-line / 4-KiB background cap has been removed; background completions preserve Pi's native output and truncation notice. UI collapse only changes presentation; the agent still receives the completion payload. Live transcript blocks identify jobs through renderer-visible result details.
 
+**Changed in 0.6.4:** the completion panel shows a colored status, a single-line `$` command preview, up to two sanitized tail lines of output, and either the output line count with `ctrl+o` hint or `(no output)`. Expand to see the job ID, multi-line command formatting, and styled output under the same header. Truncated previews keep the panel background and muted styling behind the ellipsis. Expanded transcript tool blocks also display live output while running and settled output in place.
+
 ### Seeing what is running
 
 A background acknowledgement is a *final* tool result, so Pi stops that block's own elapsed clock. Left alone, a running job would look finished. Bash Guard re-renders the block from live job state instead, using one 1 Hz tick shared with the row above the editor:
 
 ```text
 ⛨ bash sleep 8; printf 'BACKGROUND_OK\n'  (timeout 20s)
-● running · 3s · bg-588d7673
+● Running in background · 0:03 · bg-588d7673
 
 # the same block, after the job settles — no new block, no flash
 ⛨ bash sleep 8; printf 'BACKGROUND_OK\n'  (timeout 20s)
-✓ completed · 8s · exit 0
+✓ Completed · 0:08 · exit 0
 
 # above the editor, while any job runs
-▸ 2 bg · 12s │ 5m03s   npm start
+ ▸ 3 background jobs │ ● npm start 5:03 │ ● sleep 60 0:38 │ ● npm test 0:12
 ```
 
-Job state glyphs in transcript blocks and expanded widget entries: `●` running, `◐` cancelling, `✓` completed, `✗` failed, `⊘` cancelled. A failed job names its cause (`timed out after 1s`, `exit 2`, or the watchdog's kill reason). A live job keeps its job ID; settled jobs drop it.
+Job state glyphs in transcript blocks and widget entries: `●` running, `◐` cancelling, `✓` completed, `✗` failed, `⊘` cancelled. A failed job names its cause (`timed out after 1s`, `exit 2`, or the watchdog's kill reason). A live job keeps its job ID; settled jobs drop it.
 
-In fullscreen mode, click the summary row to expand or collapse a dropdown of active jobs (state, elapsed time, ID, and command). The arrow changes from `▸` to `▾`; the list shows up to eight jobs plus a count of any remaining jobs. Use `/bash-jobs toggle` for the same interaction from the keyboard, including in regular terminal mode. Expansion stays put while jobs update and resets when the last job settles or the session changes. Cancellation still uses `/bash-jobs` or `ctrl+shift+k`.
+In fullscreen mode, click the summary row to expand or collapse a dropdown of active jobs (state, aligned elapsed time, ID, and command). Click any job row to toggle an inline detail drawer with the full command, live output tail, and a clickable `[Cancel job]` action (which switches inline to `[Confirm cancel]` / `[Keep]`); expanding a single-job widget opens that drawer directly. The arrow changes from `▸` to `▾`; the list shows up to eight jobs plus a count of any remaining jobs. Use `/bash-jobs toggle` for the list toggle from the keyboard (including in regular terminal mode), and `/bash-jobs` or `ctrl+shift+k` to cancel from the keyboard. Expansion stays put while jobs update and resets when the expanded job settles or the session changes.
 
-Motion is the advancing clock, not a spinner: the agent's working indicator already owns spinners in the transcript, and a second one would compete with it. The widget row shows the oldest │ newest elapsed plus the newest command, so 16 concurrent jobs still cost one line while collapsed; it disappears when the last job settles. Nothing animates outside a TUI, and every ticker is disposed on settle, session change, and shutdown.
+Motion is the advancing clock, not a spinner: the agent's working indicator already owns spinners in the transcript, and a second one would compete with it. For one job, the collapsed widget row shows elapsed time and a command preview separated by `│`. For multiple jobs, it shows up to three job chips (`● <command> <elapsed>`) separated by `│`, longest-running first, with `+N more` when additional jobs or narrow terminals hide the rest. The dropdown uses the same order and shows job IDs and full details. Positions can change when a job finishes; use job IDs for cancellation. The collapsed widget stays one line and disappears when the last job settles. Nothing animates outside a TUI, and every ticker is disposed on settle, session change, and shutdown.
 
 `--bash-bg-animation off` renders a static snapshot and stops the 1 Hz job tick. The watchdog footer clock is unaffected.
 
@@ -235,23 +237,25 @@ Status shows the effective mode, its source, config/session enablement, the reso
 Dim to blend with Pi's footer; problems use the warning color. The badge is the guard's effective mode: `ask` or `deny` while the guard runs, `off` otherwise.
 
 ```
-⛨ BG ask                          guard prompting for risky commands, nothing judged yet
-⛨ BG deny                         deny mode; every escalation is blocked
-⛨ BG ask 4✓ 1? 1✗                 risky commands: passed by Jev, asked and allowed, blocked
-⛨ BG ask ⏱ 3:10 progressing .92   running: elapsed, latest verdict and probability
-⛨ BG ask ⏱ 7:05 stuck .88 kill 1/2  1 of 2 agreeing checks needed to kill
-⛨ BG ask ⏱ 12:00 service          long-lived service, won't be killed
-⛨ BG ask ⏱2 7:05 waiting .81      2 running, showing the oldest
-⛨ BG ask rules-only · 2?          no Jev classifier
-⛨ BG ask jev ✗ timeout · 4✓       last Jev call failed; clears on next success
-⛨ BG ask guard-only · 4✓          watchdog off (guard-only next to any badge)
-⛨ BG off · watch-only · ⏱ 3:10    guard off, watchdog running (never shows a misleading ask)
-⛨ BG deny guard-only · 1✗         env-enforced deny with the watchdog off
-⛨ BG ask ⚠ bash conflict · 4✓     another extension owns the bash override
-⛨ BG off                          disabled
+⛨ BG ask                                             guard prompting for risky commands, nothing judged yet
+⛨ BG deny                                            deny mode; every escalation is blocked
+⛨ BG ask · 4✓ 1? 1✗                                  risky commands: passed by Jev, asked and allowed, blocked
+⛨ BG ask · ⏱ 3:10 progressing .92                    running: elapsed, latest verdict and probability
+⛨ BG ask · ⏱ 7:05 stuck .88 (1/2 to kill)            1 of 2 agreeing checks needed to kill
+⛨ BG ask · ⏱ 12:00 service                           long-lived service, won't be killed
+⛨ BG ask · ⏱2 0:42                                   2 running, none checked yet (oldest timer shown)
+⛨ BG ask · ⏱2 · pytest 7:05 waiting .81              2 running, spotlighting the highest-priority checked command
+⛨ BG ask · ⏱3 2⚠ · pytest 7:05 stuck .88 (1/2 to kill)  3 running, 2 with warnings, spotlighting the closest to kill
+⛨ BG ask · rules-only · 2?                           no Jev classifier
+⛨ BG ask · jev ✗ timeout · 4✓                        last Jev call failed; clears on next success
+⛨ BG ask · guard-only · 4✓                           watchdog off (guard-only next to any badge)
+⛨ BG off · watch-only · ⏱ 3:10                       guard off, watchdog running (never shows a misleading ask)
+⛨ BG deny · guard-only · 1✗                          env-enforced deny with the watchdog off
+⛨ BG ask · ⚠ bash conflict · 4✓                      another extension owns the bash override
+⛨ BG off                                             disabled
 ```
 
-The tally counts only risky commands, hides zero buckets, and resets each session. While commands run, a ticking clock replaces it.
+The tally counts only risky commands, hides zero buckets, and resets each session. While commands run, a ticking clock replaces it; when multiple commands run concurrently, the watchdog ranks kill countdowns, stuck/looping warnings, and active work ahead of long-lived services and shows `M⚠` whenever two or more commands have warnings.
 
 ## Configuration
 

@@ -41,7 +41,7 @@ import {
 	type ToolInfo,
 } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Box, Container, Text, truncateToWidth, type AutocompleteItem, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
+import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, type AutocompleteItem, type TUI, type TuiMouseEvent, type TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { BackgroundBash, type JobSnapshot } from "../src/background.js";
 import {
@@ -58,7 +58,7 @@ import { RISKY_RULES, compilePatterns, type RiskyScan } from "../src/rules.js";
 import { publishRuntimeMarker, readPackageVersion } from "../src/runtime.js";
 import { ALLOW_ENTRY_TYPE, restoreState, SETTINGS_ENTRY_TYPE, type GuardMode, type SessionSettings } from "../src/state.js";
 import { renderStatus, type GuardTally, type StatusStyler, formatElapsed } from "../src/status.js";
-import { activeCount, isActive, renderJobLine, renderWidgetLine, type JobStyler } from "../src/render.js";
+import { activeCount, commandPreview, formatExpandedCommand, isActive, outputTailLines, renderCompletionLine, renderExpandedOutput, renderJobLine, renderWidgetView, stripOutputTruncationFooter, type JobStyler, type WidgetRenderResult } from "../src/render.js";
 import { Watchdog, type WatchCheckRecord } from "../src/watchdog.js";
 
 const FLAG_NAME = "no-bash-guard";
@@ -114,18 +114,49 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	pi.registerMessageRenderer<JobSnapshot>("bash-guard-background", (message, { expanded, outputPad }, theme) => {
 		const job = message.details;
 		if (!job) return undefined;
-		const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
-		if (expanded && typeof message.content === "string") {
-			box.addChild(new Text(message.content, 0, 0));
+		// truncateToWidth resets all styling around the ellipsis, including the box background.
+		const reset = "\x1b[0m";
+		const box = new Box(outputPad, 1, (text) =>
+			text.split(reset).map((part) => theme.bg("customMessageBg", part)).join(reset),
+		);
+		const styler = jobStyler(theme);
+		const ellipsis = styler("...", "muted");
+		if (expanded) {
+			const cmdLines = formatExpandedCommand(job.command).map((line) => styler(line, "muted")).join("\n");
+			box.addChild(new Text(
+				`${renderCompletionLine(job, styler)} ${styler(`· ${job.job_id}`, "muted")}\n${cmdLines}`,
+				0,
+				0,
+			));
+			box.addChild(new Spacer(1));
+			box.addChild(new Text(renderExpandedOutput(job, styler, "(no output)"), 0, 0));
 		} else {
-			const styler = jobStyler(theme);
+			const trimmed = job.output.trim();
+			const hasOutput = trimmed !== "" && trimmed !== "(no output)";
+			const previewSource = stripOutputTruncationFooter(job.output) || job.output;
+			const lineCount = hasOutput ? job.output.trimEnd().split("\n").length : 0;
 			box.addChild({
 				invalidate() {},
-				render: (width: number) => [
-					truncateToWidth(`Background bash ${job.job_id}: ${renderJobLine(job, styler)}`, width),
-					truncateToWidth(styler(job.command.replace(/\s+/g, " ").trim(), "muted"), width),
-					truncateToWidth(keyHint("app.tools.expand", "to expand output"), width),
-				],
+				render: (width: number) => {
+					const lines = [
+						truncateToWidth(renderCompletionLine(job, styler), width, ellipsis),
+						truncateToWidth(styler(`$ ${commandPreview(job.command)}`, "muted"), width, ellipsis),
+					];
+					if (lineCount === 0) {
+						lines.push(truncateToWidth(styler("(no output)", "muted"), width, ellipsis));
+					} else {
+						const tail = outputTailLines(previewSource, Math.max(1, width - 2), 2);
+						for (const line of tail) {
+							lines.push(truncateToWidth(styler(`  ${line}`, "toolOutput"), width, ellipsis));
+						}
+						lines.push(truncateToWidth(
+							keyHint("app.tools.expand", `to expand output (${lineCount} ${lineCount === 1 ? "line" : "lines"})`),
+							width,
+							ellipsis,
+						));
+					}
+					return lines;
+				},
 			});
 		}
 		return box;
@@ -199,6 +230,8 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	let jobTick: ReturnType<typeof setInterval> | undefined;
 	let widgetMounted = false;
 	let widgetExpanded = false;
+	let expandedJobId: string | undefined;
+	let confirmCancelJobId: string | undefined;
 	let tui: TUI | undefined;
 	const blockRefreshers = new Set<(() => void) & { jobId?: string }>();
 	const syncJobUi = (): void => syncBackgroundUi();
@@ -380,35 +413,108 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 
 	function toggleBackgroundWidget(): void {
 		widgetExpanded = !widgetExpanded;
+		confirmCancelJobId = undefined;
+		if (!widgetExpanded) {
+			expandedJobId = undefined;
+		} else {
+			const active = backgroundJobs().filter((job) => isActive(job.state));
+			if (active.length === 1) expandedJobId = active[0]!.job_id;
+		}
 		tui?.requestRender(true);
+	}
+
+	function pruneWidgetSelection(jobs: readonly JobSnapshot[]): void {
+		if (expandedJobId && !jobs.some((job) => job.job_id === expandedJobId && isActive(job.state))) {
+			expandedJobId = undefined;
+		}
+		if (confirmCancelJobId && !jobs.some((job) => job.job_id === confirmCancelJobId && job.state === "running")) {
+			confirmCancelJobId = undefined;
+		}
 	}
 
 	/** Mount above the editor while jobs run; disappear when the last one settles. */
 	function syncBackgroundWidget(ctx?: ExtensionContext): void {
 		const sink = ctx?.hasUI ? ctx.ui : ui;
-		const wanted = sink !== undefined && activeCount(backgroundJobs()) > 0;
+		const jobs = backgroundJobs();
+		const wanted = sink !== undefined && activeCount(jobs) > 0;
 		if (!wanted) {
 			if (widgetMounted && sink) sink.setWidget(WIDGET_KEY, undefined);
 			widgetMounted = false;
 			widgetExpanded = false;
+			expandedJobId = undefined;
+			confirmCancelJobId = undefined;
 			return;
 		}
+		pruneWidgetSelection(jobs);
 		if (!sink) return;
 		if (!widgetMounted) {
 			sink.setWidget(WIDGET_KEY, (nextTui, theme) => {
 				tui = nextTui;
 				const styler = jobStyler(theme);
+				let lastWidth = 80;
+				let lastView: WidgetRenderResult = { lines: [], targets: [] };
 				return {
 					invalidate() {},
 					handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
-						if (event.type === "click" && event.button === "left" && event.y === 0) {
+						if (event.type !== "click" || event.button !== "left") return undefined;
+						const view = lastView.targets.length > 0
+							? lastView
+							: renderWidgetView(backgroundJobs(), styler, event.width ?? lastWidth, {
+								expanded: widgetExpanded,
+								expandedJobId,
+								confirmCancelJobId,
+							});
+						const rowTargets = view.targets[event.y];
+						if (!rowTargets || rowTargets.length === 0) return undefined;
+						const hit = rowTargets.find((target) =>
+							target.startX === undefined || target.endX === undefined
+								? true
+								: typeof event.x === "number" && event.x >= target.startX && event.x < target.endX,
+						);
+						if (!hit) return undefined;
+						const { action } = hit;
+						if (action.type === "toggle-widget") {
 							toggleBackgroundWidget();
 							return { handled: true };
 						}
+						if (action.type === "toggle-job") {
+							expandedJobId = expandedJobId === action.jobId ? undefined : action.jobId;
+							confirmCancelJobId = undefined;
+							tui?.requestRender(true);
+							return { handled: true };
+						}
+						if (action.type === "request-cancel") {
+							confirmCancelJobId = action.jobId;
+							tui?.requestRender(true);
+							return { handled: true };
+						}
+						if (action.type === "confirm-cancel") {
+							confirmCancelJobId = undefined;
+							const current = backgroundJobs().find((entry) => entry.job_id === action.jobId);
+							if (current && current.state === "running") {
+								const [cancelled] = background.cancel(current.job_id);
+								notifySafe(`bash-guard: cancelling ${cancelled!.job_id}`, "info");
+							}
+							tui?.requestRender(true);
+							return { handled: true };
+						}
+						if (action.type === "dismiss-cancel") {
+							confirmCancelJobId = undefined;
+							tui?.requestRender(true);
+							return { handled: true };
+						}
+						return undefined;
 					},
 					render(width: number): string[] {
-						const rows = renderWidgetLine(backgroundJobs(), styler, width, widgetExpanded);
-						return rows.map((row) => truncateToWidth(row, width));
+						lastWidth = width;
+						const current = backgroundJobs();
+						pruneWidgetSelection(current);
+						lastView = renderWidgetView(current, styler, width, {
+							expanded: widgetExpanded,
+							expandedJobId,
+							confirmCancelJobId,
+						});
+						return lastView.lines;
 					},
 				};
 			}, { placement: "aboveEditor" });
@@ -433,6 +539,8 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		if (widgetMounted && ui) ui.setWidget(WIDGET_KEY, undefined);
 		widgetMounted = false;
 		widgetExpanded = false;
+		expandedJobId = undefined;
+		confirmCancelJobId = undefined;
 		tui = undefined;
 	}
 
@@ -582,6 +690,14 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	// result and stops the block's own elapsed clock (and hides the default
 	// "Took" line), which would leave a running job looking finished. Such
 	// blocks render from live job state instead and refresh on the shared tick.
+	function expandHintText(description: string, styler: JobStyler): string {
+		try {
+			return keyHint("app.tools.expand", description);
+		} catch {
+			return styler(`ctrl+o ${description}`, "muted");
+		}
+	}
+
 	pi.registerToolRenderer((toolName, next) => {
 		if (toolName !== "bash") return next();
 		const base = next();
@@ -590,7 +706,24 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		return {
 			...base,
 			renderCall: (args, theme, context) => {
-				const component = baseRenderCall(args, theme, { ...executionContext(context), lastComponent: undefined });
+				const baseComponent = baseRenderCall(args, theme, { ...executionContext(context), lastComponent: undefined });
+				const isBgCall = (args as { background?: unknown } | undefined)?.background === true;
+				const styler = jobStyler(theme);
+				const component = isBgCall && baseComponent && typeof baseComponent.render === "function"
+					? {
+						invalidate: () => baseComponent.invalidate?.(),
+						render: (width: number): string[] => {
+							const lines = baseComponent.render(width);
+							if (lines.length === 0) return lines;
+							const tag = styler(" (background)", "muted");
+							const last = lines.at(-1)!;
+							if (visibleWidth(last) + visibleWidth(tag) <= width) {
+								return [...lines.slice(0, -1), `${last}${tag}`];
+							}
+							return [...lines, truncateToWidth(styler("(background)", "muted"), width)];
+						},
+					}
+					: baseComponent;
 				const label = guardScores.get(context.toolCallId);
 				if (label === undefined) return component;
 				const container = new Container();
@@ -602,7 +735,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 				? (result, options, theme, context) => {
 					const jobId = backgroundJobId(result, options);
 					if (jobId === undefined) return base.renderResult!(result, options, theme, executionContext(context));
-					return jobComponent(jobId, theme, context);
+					return jobComponent(jobId, options.expanded, theme, context);
 				}
 				: undefined,
 		};
@@ -616,11 +749,18 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	}
 
 	/** A block that keeps its clock while the job runs and settles in place. */
-	function jobComponent(jobId: string, theme: ExtensionUIContext["theme"], context: { state: Record<string, unknown>; invalidate: () => void }): Container {
+	function jobComponent(jobId: string, expanded: boolean, theme: ExtensionUIContext["theme"], context: { state: Record<string, unknown>; invalidate: () => void }): Container {
 		const styler = jobStyler(theme);
 		const container = new Container();
+		container.addChild(new Spacer(1));
 		const line = new Text("", 0, 0);
 		container.addChild(line);
+		let outputText: Text | undefined;
+		if (expanded) {
+			container.addChild(new Spacer(1));
+			outputText = new Text("", 0, 0);
+			container.addChild(outputText);
+		}
 		const refresh = ((): (() => void) & { jobId?: string } => {
 			const registered = (): void => {
 				paint();
@@ -635,9 +775,23 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			if (!job) {
 				blockRefreshers.delete(refresh);
 				line.setText(styler("job result evicted", "muted"));
+				outputText?.setText("");
 				return;
 			}
-			line.setText(renderJobLine(job, styler));
+			const statusLine = renderJobLine(job, styler);
+			if (outputText) {
+				line.setText(statusLine);
+				outputText.setText(renderExpandedOutput(job, styler, isActiveJob(job) ? "(no output yet)" : "(no output)"));
+			} else {
+				const trimmed = job.output.trim();
+				const hasOutput = trimmed !== "" && trimmed !== "(no output)";
+				if (hasOutput) {
+					const lineCount = job.output.trimEnd().split("\n").length;
+					line.setText(`${statusLine}\n${expandHintText(`to expand output (${lineCount} ${lineCount === 1 ? "line" : "lines"})`, styler)}`);
+				} else {
+					line.setText(statusLine);
+				}
+			}
 			if (!isActiveJob(job)) blockRefreshers.delete(refresh);
 		}
 		// Pi may re-invoke this renderer for the same row; one refresher per job.
@@ -855,12 +1009,30 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 
 	// --- operator controls -----------------------------------------------------
 
+	function cancelLabel(job: JobSnapshot, index?: number): string {
+		const order = index === undefined ? "" : `#${index + 1}  `;
+		return `${order}${formatElapsed(job.wall_time_seconds).padStart(6)}  ${job.job_id}  ${job.state.padEnd(10)}  ${commandPreview(job.command).slice(0, 60)}`;
+	}
+
+	async function confirmAndCancelJob(uiContext: ExtensionUIContext, job: JobSnapshot): Promise<void> {
+		if (!await uiContext.confirm("Cancel background job?", cancelLabel(job))) return;
+		const current = backgroundJobs().find((entry) => entry.job_id === job.job_id);
+		if (!current || !isActive(current.state)) {
+			notifySafe(`bash-guard: ${job.job_id} already finished`, "info");
+			return;
+		}
+		const [cancelled] = background.cancel(current.job_id);
+		notifySafe(`bash-guard: cancelling ${cancelled!.job_id}`, "info");
+	}
+
 	/**
 	 * Stop a job from the keyboard. The model has `bash_jobs`, but ending your own
 	 * runaway command should not require spending a turn.
 	 */
 	async function cancelInteractively(ctx: ExtensionCommandContext | ExtensionContext): Promise<void> {
-		const active = backgroundJobs().filter((job) => job.state === "running" || job.state === "cancelling");
+		const active = backgroundJobs()
+			.filter((job) => job.state === "running" || job.state === "cancelling")
+			.sort((a, b) => b.wall_time_seconds - a.wall_time_seconds);
 		if (active.length === 0) {
 			notifySafe("bash-guard: no background jobs are running", "info");
 			return;
@@ -869,16 +1041,12 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			notifySafe(`bash-guard: ${active.length} background job(s) running; use bash_jobs to cancel`, "warning");
 			return;
 		}
-		const label = (job: JobSnapshot): string =>
-			`${formatElapsed(job.wall_time_seconds).padStart(6)}  ${job.state.padEnd(10)}  ${job.command.replace(/\s+/g, " ").slice(0, 60)}`;
-		let target: JobSnapshot | undefined;
 		if (active.length === 1) {
-			const [only] = active;
-			target = await ctx.ui.confirm("Cancel background job?", label(only!)) ? only : undefined;
-		} else {
-			const chosen = await ctx.ui.select("Cancel which background job?", active.map(label));
-			target = active.find((job) => label(job) === chosen);
+			await confirmAndCancelJob(ctx.ui, active[0]!);
+			return;
 		}
+		const chosen = await ctx.ui.select("Cancel which background job?", active.map((job, index) => cancelLabel(job, index)));
+		const target = active.find((job, index) => cancelLabel(job, index) === chosen);
 		if (!target) return;
 		const [cancelled] = background.cancel(target.job_id);
 		notifySafe(`bash-guard: cancelling ${cancelled!.job_id}`, "info");

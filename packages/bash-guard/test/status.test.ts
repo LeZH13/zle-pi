@@ -16,7 +16,7 @@ function state(overrides: Partial<BashGuardStatusState> = {}): BashGuardStatusSt
 }
 
 function live(overrides: Partial<WatchLive> = {}): WatchLive {
-	return { running: 1, elapsedSeconds: 42, ...overrides };
+	return { running: 1, warnings: 0, command: "sleep 60", elapsedSeconds: 42, ...overrides };
 }
 
 function check(overrides: Partial<NonNullable<WatchLive["check"]>> = {}): NonNullable<WatchLive["check"]> {
@@ -89,9 +89,9 @@ describe("footer status: running", () => {
 	});
 
 	it("shows kill progress in warning style", () => {
-		const input = state({ live: live({ elapsedSeconds: 425, check: check({ status: "stuck", p: 0.88, agree: 1 }) }) });
-		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱ 7:05 stuck .88 kill 1/2");
-		expect(kinds(input)).toContain("warning:stuck .88 kill 1/2");
+		const input = state({ live: live({ warnings: 1, elapsedSeconds: 425, check: check({ status: "stuck", p: 0.88, agree: 1 }) }) });
+		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱ 7:05 stuck .88 (1/2 to kill)");
+		expect(kinds(input)).toContain("warning:stuck .88 (1/2 to kill)");
 	});
 
 	it("shows a vetoed long-lived service", () => {
@@ -100,10 +100,59 @@ describe("footer status: running", () => {
 		);
 	});
 
-	it("shows the running count when several commands run", () => {
-		expect(renderStatus(state({ live: live({ running: 2, elapsedSeconds: 425, check: check({ status: "waiting", p: 0.81 }) }) }), identity)).toBe(
-			"⛨ BG ask · ⏱2 7:05 waiting .81",
+	it("shows the running count before any check completes", () => {
+		expect(renderStatus(state({ live: live({ running: 2, elapsedSeconds: 42 }) }), identity)).toBe(
+			"⛨ BG ask · ⏱2 0:42",
 		);
+	});
+
+	it("spotlights the command name, timer, and verdict when several commands run", () => {
+		expect(
+			renderStatus(
+				state({
+					live: live({
+						running: 2,
+						command: "cargo test",
+						elapsedSeconds: 190,
+						check: check({ status: "progressing", p: 0.92 }),
+					}),
+				}),
+				identity,
+			),
+		).toBe("⛨ BG ask · ⏱2 · cargo test 3:10 progressing .92");
+	});
+
+	it("shows a single warning spotlight without a redundant warning count", () => {
+		const input = state({
+			live: live({
+				running: 3,
+				warnings: 1,
+				command: "/usr/local/bin/pytest -q",
+				elapsedSeconds: 425,
+				check: check({ status: "stuck", p: 0.88, agree: 1 }),
+			}),
+		});
+		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱3 · pytest -q 7:05 stuck .88 (1/2 to kill)");
+		const seen = kinds(input);
+		expect(seen).toContain("dim:⏱3");
+		expect(seen).toContain("warning:stuck .88 (1/2 to kill)");
+	});
+
+	it("surfaces a compact multi-warning count when two or more commands warn", () => {
+		const input = state({
+			live: live({
+				running: 3,
+				warnings: 2,
+				command: "pytest",
+				elapsedSeconds: 190,
+				check: check({ status: "stuck", p: 0.88, agree: 1 }),
+			}),
+		});
+		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱3 2⚠ · pytest 3:10 stuck .88 (1/2 to kill)");
+		const seen = kinds(input);
+		expect(seen).toContain("dim:⏱3");
+		expect(seen).toContain("warning:2⚠");
+		expect(seen).toContain("warning:stuck .88 (1/2 to kill)");
 	});
 
 	it("keeps a degraded label before the running segment", () => {

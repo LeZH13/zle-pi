@@ -8,6 +8,7 @@
  * otherwise (including when only the watchdog runs, next to a "watch-only"
  * label, so it never shows a misleading "ask").
  */
+import { stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
 import type { JevFailureReason } from "./jev.js";
 import type { WatchLive } from "./watchdog.js";
 
@@ -85,13 +86,51 @@ function renderTally(
 	return chunks.length === 0 ? undefined : chunks.join(dim(" "));
 }
 
+export function sanitizeLine(text: string): string {
+	return stripTerminalSequences(text).replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
+}
+
+export function commandPreview(command: string): string {
+	return sanitizeLine(command).replace(/\s+/g, " ").trim();
+}
+
+/** Compact command label; shortens a leading path binary to its basename. */
+export function chipCommand(command: string, maxLen = 16): string {
+	let preview = commandPreview(command);
+	const quotedPath = preview.match(/^"([^"\s]+\/([^"\s/]+))"(\s.*)?$/);
+	if (quotedPath) preview = `${quotedPath[2]!}${quotedPath[3] ?? ""}`;
+	else {
+		const barePath = preview.match(/^(\S+\/([^\s/]+))(\s.*)?$/);
+		if (barePath) preview = `${barePath[2]!}${barePath[3] ?? ""}`;
+	}
+	return truncateToWidth(preview, maxLen, "…");
+}
+
 function renderLive(live: WatchLive, dim: (text: string) => string, warning: (text: string) => string): string {
-	const clock = dim(`⏱${live.running > 1 ? live.running : ""} ${formatElapsed(live.elapsedSeconds)}`);
+	const elapsed = formatElapsed(live.elapsedSeconds);
 	const check = live.check;
-	if (!check) return clock;
-	if (check.service) return `${clock} ${dim("service")}`;
+	if (!check) {
+		return dim(`⏱${live.running > 1 ? live.running : ""} ${elapsed}`);
+	}
+	const styledVerdict = styleVerdict(check, dim, warning);
+	if (live.running <= 1) {
+		return `${dim(`⏱ ${elapsed}`)} ${styledVerdict}`;
+	}
+	const warnings = live.warnings ?? 0;
+	const head = warnings > 1 ? `${dim(`⏱${live.running}`)} ${warning(`${warnings}⚠`)}` : dim(`⏱${live.running}`);
+	const cmd = live.command ? chipCommand(live.command, 16) : "";
+	const focus = cmd ? `${cmd} ${elapsed}` : elapsed;
+	return `${head}${dim(" · ")}${dim(focus)} ${styledVerdict}`;
+}
+
+function styleVerdict(
+	check: NonNullable<WatchLive["check"]>,
+	dim: (text: string) => string,
+	warning: (text: string) => string,
+): string {
+	if (check.service) return dim("service");
 	const verdict = `${check.status} ${prob(check.p)}`;
-	if (check.agree > 0) return `${clock} ${warning(`${verdict} kill ${check.agree}/${check.agreeNeeded}`)}`;
+	if (check.agree > 0) return warning(`${verdict} (${check.agree}/${check.agreeNeeded} to kill)`);
 	const bad = check.status === "stuck" || check.status === "looping";
-	return `${clock} ${bad ? warning(verdict) : dim(verdict)}`;
+	return bad ? warning(verdict) : dim(verdict);
 }

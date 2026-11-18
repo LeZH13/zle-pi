@@ -403,17 +403,26 @@ describe("watchdog unavailable Jev", () => {
 });
 
 describe("watchdog live view", () => {
-	it("reports the oldest running command's clock and latest check", async () => {
+	it("reports the spotlighted command's clock, warnings, and latest check", async () => {
 		const h = setup({ status: "stuck", pStatus: 0.9, persistent: 0 });
-		expect(h.watchdog.live()).toEqual({ running: 1, elapsedSeconds: 0 });
+		expect(h.watchdog.live()).toEqual({
+			running: 1,
+			warnings: 0,
+			command: "tail -f /tmp/app.log",
+			elapsedSeconds: 0,
+		});
 		await vi.advanceTimersByTimeAsync(FIRST_MS);
 		expect(h.watchdog.live()).toEqual({
 			running: 1,
+			warnings: 1,
+			command: "tail -f /tmp/app.log",
 			elapsedSeconds: FIRST_MS / 1000,
 			check: { status: "stuck", p: 0.9, agree: 1, agreeNeeded: 2, service: false },
 		});
 		h.watchdog.start("second", "/w", { abort: vi.fn() });
 		expect(h.watchdog.live()?.running).toBe(2);
+		expect(h.watchdog.live()?.warnings).toBe(1);
+		expect(h.watchdog.live()?.command).toBe("tail -f /tmp/app.log");
 		expect(h.watchdog.live()?.elapsedSeconds).toBe(FIRST_MS / 1000);
 		h.watchdog.dispose();
 		expect(h.watchdog.live()).toBeUndefined();
@@ -423,8 +432,81 @@ describe("watchdog live view", () => {
 		const h = setup({ status: "stuck", pStatus: 0.9, persistent: 0.9 });
 		await vi.advanceTimersByTimeAsync(FIRST_MS);
 		expect(h.watchdog.live()?.check).toMatchObject({ service: true, agree: 0 });
+		expect(h.watchdog.live()?.warnings).toBe(0);
 		const failing = setup({ ok: false, reason: "timeout" });
 		await vi.advanceTimersByTimeAsync(FIRST_MS);
 		expect(failing.watchdog.live()?.check).toBeUndefined();
+		expect(failing.watchdog.live()?.warnings).toBe(0);
+	});
+
+	it("prioritizes kill countdowns and warnings over older healthy or service commands", async () => {
+		const replies = new Map<string, JevScript>([
+			["npm run dev", { status: "stuck", pStatus: 0.9, persistent: 0.9 }],
+			["cargo test", { status: "progressing", pStatus: 0.92, persistent: 0 }],
+			["pytest", { status: "stuck", pStatus: 0.72, persistent: 0 }],
+			["eslint", { status: "looping", pStatus: 0.88, persistent: 0 }],
+		]);
+		const jev: Jev = {
+			available: true,
+			model: "typesafe/jev-latest",
+			async ensureAvailable() { return true; },
+			describeUnavailable: () => "",
+			async guardAnswer() { throw new Error("unused"); },
+			async watchdogAnswer(state) {
+				const cmd = (state as { value: { command: string } }).value.command;
+				const script = replies.get(cmd) ?? { status: "progressing", pStatus: 0.9, persistent: 0 };
+				return {
+					ok: true,
+					status: script.status,
+					pStatus: script.pStatus,
+					probabilities: { [script.status]: script.pStatus },
+					persistent: script.persistent,
+					model: "t",
+				};
+			},
+			usage: () => ({ input: 0, output: 0, totalTokens: 0, cost: 0 }),
+			lastFailure: undefined,
+		};
+		const config = structuredClone(DEFAULT_CONFIG);
+		const watchdog = new Watchdog({ config, jev, now: () => Date.now(), steer: vi.fn(), notify: vi.fn() });
+
+		const dev = watchdog.start("npm run dev", "/w", { abort: vi.fn() });
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(watchdog.live()).toMatchObject({ running: 1, warnings: 0, command: "npm run dev", check: { service: true } });
+
+		// Unchecked newcomer leaves the checked service spotlighted.
+		const cargo = watchdog.start("cargo test", "/w", { abort: vi.fn() });
+		expect(watchdog.live()).toMatchObject({ running: 2, warnings: 0, command: "npm run dev" });
+
+		// Active progressing work beats long-lived service.
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(watchdog.live()).toMatchObject({ running: 2, warnings: 0, command: "cargo test", check: { status: "progressing" } });
+
+		// Early warning (below confidence) beats progressing.
+		const pytest = watchdog.start("pytest", "/w", { abort: vi.fn() });
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(watchdog.live()).toMatchObject({
+			running: 3,
+			warnings: 1,
+			command: "pytest",
+			check: { status: "stuck", p: 0.72, agree: 0 },
+		});
+
+		// Kill countdown (agree > 0) beats early warning and counts all active warnings.
+		const eslint = watchdog.start("eslint", "/w", { abort: vi.fn() });
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(watchdog.live()).toMatchObject({
+			running: 4,
+			warnings: 2,
+			command: "eslint",
+			elapsedSeconds: FIRST_MS / 1000,
+			check: { status: "looping", p: 0.88, agree: 1, agreeNeeded: 2 },
+		});
+
+		watchdog.finish(dev);
+		watchdog.finish(cargo);
+		watchdog.finish(pytest);
+		watchdog.finish(eslint);
+		watchdog.dispose();
 	});
 });
