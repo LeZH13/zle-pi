@@ -2,7 +2,7 @@
  * The watchdog: watch running bash commands and ask Jev periodically whether
  * they are progressing, waiting, stuck, or looping.
  *
- * Kill requires `agreeChecks` consecutive checks with a stuck/looping status at
+ * A stop recommendation requires `agreeChecks` consecutive checks with a stuck/looping status at
  * or above `confidence`. A high `persistent` probability (a legitimate long-lived
  * service) vetoes the kill - except for `looping`, which always counts as a
  * failure loop - and instead steers the agent once per command to background
@@ -10,7 +10,9 @@
  * tool then reports the process tree as terminated, and the wrapper in
  * extensions/index.ts turns that into a watchdog-specific error message.
  */
-import type { BashGuardConfig } from "./config.js";
+import type { BashGuardConfig, WatchdogStopMode } from "./config.js";
+import { commandPreview } from "./status.js";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { Jev, WatchdogJevAnswer, WatchdogStatus } from "./jev.js";
 import { redactSecrets } from "./redact.js";
 import { truncateTail } from "@earendil-works/pi-coding-agent";
@@ -20,7 +22,16 @@ const TAIL_LIMIT_CHARS = 6000;
 /** Bound on the tail sent to Jev and error messages, in characters. */
 const REPORT_TAIL_CHARS = 1500;
 
+export interface StopRecommendation {
+	command: string;
+	jobId?: string;
+	elapsedSeconds: number;
+	reason: string;
+}
+
 export interface WatchdogDeps {
+	stopMode?(): WatchdogStopMode;
+	approveStop?(recommendation: StopRecommendation, signal: AbortSignal): Promise<boolean>;
 	config: BashGuardConfig;
 	jev: Jev;
 	now(): number;
@@ -51,6 +62,7 @@ export interface WatchCheckRecord {
 
 /** Live view of the highest-priority watched command, for the footer. */
 export interface WatchLive {
+	pendingDecisions?: number;
 	/** Commands currently watched. */
 	running: number;
 	/** Running commands currently flagged stuck or looping (excluding services). */
@@ -89,6 +101,8 @@ interface Entry {
 	killReason?: string;
 	steered: boolean;
 	agreeCount: number;
+	decision?: "pending" | "keep";
+	jobId?: string;
 	lastCheck?: WatchLive["check"];
 	timer?: ReturnType<typeof setTimeout>;
 	checkAbort?: AbortController;
@@ -121,7 +135,7 @@ export class Watchdog {
 	}
 
 	/** Track a running command. `hooks.abort` must abort that command's execution. */
-	start(command: string, cwd: string, hooks: { abort(): void }): WatchdogHandle {
+	start(command: string, cwd: string, hooks: { abort(): void; jobId?: string }): WatchdogHandle {
 		const now = this.deps.now();
 		const entry: Entry = {
 			id: this.nextId++,
@@ -136,6 +150,7 @@ export class Watchdog {
 			steered: false,
 			agreeCount: 0,
 			abort: hooks.abort,
+			jobId: hooks.jobId,
 		};
 		this.entries.set(entry.id, entry);
 		this.logs.delete(command); // a fresh run starts a fresh log
@@ -181,17 +196,30 @@ export class Watchdog {
 		return this.entries.size;
 	}
 
+	withdrawStopDecisions(): void {
+		for (const entry of this.entries.values()) {
+			if (entry.decision !== "pending") continue;
+			entry.decision = "keep";
+			entry.agreeCount = 0;
+			entry.lastCheck = undefined;
+			entry.checkAbort?.abort();
+		}
+	}
+
 	/** The highest-priority watched command, or undefined when none runs. */
 	live(): WatchLive | undefined {
 		let focus: Entry | undefined;
 		let warnings = 0;
+		let pendingDecisions = 0;
 		for (const entry of this.entries.values()) {
 			if (isWarningCheck(entry.lastCheck)) warnings++;
+			if (entry.decision === "pending") pendingDecisions++;
 			if (!focus || compareLivePriority(entry, focus) < 0) focus = entry;
 		}
 		if (!focus) return undefined;
 		return {
 			running: this.entries.size,
+			...(pendingDecisions ? { pendingDecisions } : {}),
 			warnings,
 			command: focus.command,
 			elapsedSeconds: Math.max(0, Math.floor((this.deps.now() - focus.startedAt) / 1000)),
@@ -243,7 +271,7 @@ export class Watchdog {
 		} catch {
 			// A check failure must never break the watched command.
 		}
-		if (entry.active && !entry.killed) {
+		if (entry.active && !entry.killed && entry.decision !== "keep") {
 			this.arm(entry, this.intervalMs);
 		}
 	}
@@ -328,16 +356,46 @@ export class Watchdog {
 
 		entry.agreeCount++;
 		if (entry.agreeCount >= this.deps.config.watchdog.agreeChecks) {
+			const reason = `Jev judged the running command ${STATUS_TEXT[answer.status]} (confidence ${answer.pStatus.toFixed(2)}) across ${entry.agreeCount} consecutive checks`;
+			const mode = this.deps.stopMode?.() ?? this.deps.config.watchdog.stopMode;
+			if (mode === "notify-only") {
+				const command = truncateToWidth(commandPreview(redactSecrets(entry.command)), 240);
+				entry.decision = "keep";
+				entry.agreeCount = 0;
+				record("notified", answer);
+				this.deps.notify(`Watchdog: leaving command running after ${elapsed()}s\n$ ${command}\n${reason}`, "warning");
+				return;
+			}
+			if (mode === "ask") {
+				entry.decision = "pending";
+				record("awaiting decision", answer);
+				let approved = false;
+				try {
+					approved = await this.deps.approveStop?.({
+						command: entry.command, jobId: entry.jobId, elapsedSeconds: elapsed(), reason,
+					}, checkAbort.signal) === true;
+				} catch {
+					// An unavailable dialog is not consent.
+				}
+				if (!entry.active || checkAbort.signal.aborted) return;
+				if (!approved) {
+					entry.decision = "keep";
+					entry.agreeCount = 0;
+					record("kept running");
+					return;
+				}
+				entry.decision = undefined;
+			}
 			record("kill", answer);
-			this.kill(entry, answer.status, answer.pStatus);
+			this.kill(entry, reason);
 		} else {
 			record(`agree ${entry.agreeCount}/${this.deps.config.watchdog.agreeChecks}`, answer);
 		}
 	}
 
-	private kill(entry: Entry, status: WatchdogStatus, pStatus: number): void {
+	private kill(entry: Entry, reason: string): void {
 		entry.killed = true;
-		entry.killReason = `Jev judged the running command ${STATUS_TEXT[status]} (confidence ${pStatus.toFixed(2)}) across ${entry.agreeCount} consecutive checks`;
+		entry.killReason = reason;
 		this.clearTimers(entry);
 		this.deps.notify(`bash-guard killed: ${entry.command}\n${entry.killReason}`, "error");
 		this.deps.steer(

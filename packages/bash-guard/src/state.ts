@@ -6,7 +6,7 @@
  * Settings are snapshots (last valid one wins); session allows accumulate as
  * individual entries so repeated "Allow for this session" stays compact.
  */
-import type { ApprovalMode } from "./config.js";
+import { isWatchdogStopMode, type ApprovalMode, type WatchdogStopMode } from "./config.js";
 
 export const SETTINGS_ENTRY_TYPE = "bash-guard-settings";
 export const ALLOW_ENTRY_TYPE = "bash-guard-allow";
@@ -17,6 +17,7 @@ export type GuardMode = ApprovalMode | "off";
 export interface SessionSettings {
 	guard?: GuardMode;
 	watchdog?: boolean;
+	watchdogStopMode?: WatchdogStopMode;
 }
 
 export interface AllowData {
@@ -31,7 +32,9 @@ function readSettings(data: unknown): SessionSettings | undefined {
 	if (!isRecord(data)) return undefined;
 	if (data.guard !== undefined && data.guard !== "ask" && data.guard !== "deny" && data.guard !== "off") return undefined;
 	if (data.watchdog !== undefined && typeof data.watchdog !== "boolean") return undefined;
+	if (data.watchdogStopMode !== undefined && !isWatchdogStopMode(data.watchdogStopMode)) return undefined;
 	return {
+		...(data.watchdogStopMode !== undefined ? { watchdogStopMode: data.watchdogStopMode } : {}),
 		...(data.guard !== undefined ? { guard: data.guard as GuardMode } : {}),
 		...(data.watchdog !== undefined ? { watchdog: data.watchdog } : {}),
 	};

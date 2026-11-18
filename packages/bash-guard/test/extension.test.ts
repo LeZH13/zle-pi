@@ -88,6 +88,7 @@ interface Harness {
 		notify: ReturnType<typeof vi.fn>;
 		select: ReturnType<typeof vi.fn>;
 		setStatus: ReturnType<typeof vi.fn>;
+		theme: { fg: ReturnType<typeof vi.fn<(kind: string, text: string) => string>> };
 	};
 	entries: { type: string; data: unknown }[];
 	sessionStart(reason?: "startup" | "reload" | "new" | "resume" | "fork"): Promise<void>;
@@ -107,6 +108,7 @@ function makeHarness(
 	options: {
 		flag?: boolean;
 		hasUI?: boolean;
+		mode?: "tui" | "rpc";
 		jevP?: number;
 		branch?: unknown[];
 		branchThrows?: boolean;
@@ -141,9 +143,9 @@ function makeHarness(
 	const entries: { type: string; data: unknown }[] = [];
 	const ui = {
 		notify: vi.fn(),
-		select: vi.fn(async () => "Block"),
+		select: vi.fn(async (_title: string, _rows: string[]): Promise<string | undefined> => "Block"),
 		setStatus: vi.fn(),
-		theme: { fg: (_kind: string, text: string) => text },
+		theme: { fg: vi.fn((_kind: string, text: string) => text) },
 	};
 	const registry = options.jevP === undefined ? undefined : makeRegistry(options.jevP);
 
@@ -182,6 +184,7 @@ function makeHarness(
 		({
 			cwd,
 			hasUI: options.hasUI ?? true,
+			mode: options.mode ?? "tui",
 			ui,
 			signal: new AbortController().signal,
 			sessionManager: {
@@ -271,9 +274,9 @@ describe("Jev endpoint extension wiring", () => {
 		await expect(h.toolCall("rm -rf node_modules")).resolves.toBeUndefined();
 		expect(fetch).toHaveBeenCalledOnce();
 		expect(h.registry!.classify).not.toHaveBeenCalled();
-		await h.command("");
+		await h.command("status");
 		const status = h.ui.notify.mock.calls.at(-1)![0] as string;
-		expect(status).toContain("jev: on - endpoint/custom-[REDACTED]");
+		expect(status).toContain("Model          endpoint/custom-[REDACTED]");
 		expect(status).not.toContain(key);
 		expect(status).not.toContain("private-endpoint.example");
 		await h.shutdown();
@@ -287,8 +290,8 @@ describe("Jev endpoint extension wiring", () => {
 		await expect(h.toolCall("rm -rf node_modules")).resolves.toBeUndefined();
 		expect(fetch).toHaveBeenCalledTimes(2);
 		expect(h.registry!.classify).toHaveBeenCalledOnce();
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("jev: on - typesafe/jev-latest");
+		await h.command("status");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Model          typesafe/jev-latest");
 		await h.shutdown();
 	});
 });
@@ -301,15 +304,15 @@ describe("project config only tightens", () => {
 		expect(runtime()!.guardEnabled).toBe(true);
 		expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("may only tighten the guard; ignored guard.enabled"), "warning");
 		await expect(h.toolCall("rm -rf /")).resolves.toMatchObject({ block: true });
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("ignored guard.enabled (project config may only tighten)");
+		await h.command("status");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Ignored keys   ⚠ guard.enabled");
 	});
 
 	it("ignores a repo's allow patterns, so a whitelisted command is still judged", async () => {
 		const h = makeHarness({ jevP: 0.9, config: { guard: { allowPatterns: ["npm run build"] } } });
 		await h.sessionStart();
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("ignored guard.allowPatterns");
+		await h.command("status");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Ignored keys   ⚠ guard.allowPatterns");
 		await expect(h.toolCall("npm run build && rm -rf ~")).resolves.toMatchObject({ block: true });
 	});
 
@@ -317,8 +320,8 @@ describe("project config only tightens", () => {
 		const h = makeHarness({ jevP: 0.1, config: { guard: { allowBelow: 0.05, extraRiskyPatterns: ["^helm uninstall"] } } });
 		await h.sessionStart();
 		expect(h.ui.notify.mock.calls.flat().join(" ")).not.toContain("may only tighten");
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("allowBelow 0.05");
+		await h.command("status");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Allow below    0.05");
 		await h.shutdown();
 	});
 });
@@ -525,12 +528,79 @@ describe("tool_call gating", () => {
 });
 
 describe("session settings commands", () => {
+	it.each(["tui", "rpc"] as const)("only dims mode descriptions in the terminal menu (%s)", async (mode) => {
+		const h = makeHarness({ mode });
+		await h.sessionStart();
+		h.ui.theme.fg.mockImplementation((kind, text) => kind === "dim" ? `\x1b[90m${text}\x1b[39m` : text);
+		h.ui.select.mockResolvedValueOnce("Watchdog     Ask").mockImplementationOnce(async (_title, rows) => {
+			const description = mode === "tui" ? "\x1b[90mConfirm before stopping\x1b[39m" : "Confirm before stopping";
+			expect(rows[0]).toBe(`● Ask           ${description}`);
+			return rows[0];
+		});
+		await h.command("");
+		expect(h.entries.at(-1)?.data).toEqual({ watchdog: true, watchdogStopMode: "ask" });
+	});
+	it("offers separate settings menus and saves a watchdog mode without touching the guard", async () => {
+		const h = makeHarness();
+		await h.sessionStart();
+		h.ui.select.mockResolvedValueOnce("Watchdog     Ask").mockResolvedValueOnce("○ Notify only   Warn and leave running");
+		await h.command("");
+		expect(h.ui.select.mock.calls[0]![1]).toEqual(["Guard        Ask", "Watchdog     Ask", "Status       View details"]);
+		expect(h.ui.select.mock.calls[1]![1]).toEqual([
+			"● Ask           Confirm before stopping",
+			"○ Notify only   Warn and leave running",
+			"○ Auto-stop     Stop automatically",
+			"○ Off           Turn off the watchdog",
+			"↩ Back to settings",
+		]);
+		expect(h.entries.at(-1)!.data).toEqual({ watchdog: true, watchdogStopMode: "notify-only" });
+		h.ui.select.mockResolvedValueOnce("Guard        Ask").mockResolvedValueOnce("○ Deny          Block risky commands");
+		await h.command("");
+		expect(h.entries.at(-1)!.data).toEqual({ guard: "deny", watchdog: true, watchdogStopMode: "notify-only" });
+		h.ui.select.mockResolvedValueOnce("Status       View details");
+		await h.command("");
+		expect(h.ui.notify.mock.lastCall![0]).toContain("── Watchdog ──\n  Mode           notify-only (session)");
+		const saved = h.entries.length;
+		h.ui.select.mockResolvedValueOnce(undefined);
+		await h.command("");
+		expect(h.entries).toHaveLength(saved);
+	});
+
+	it.each([
+		["Guard        Ask", undefined, "Guard"],
+		["Watchdog     Ask", undefined, "Watchdog"],
+		["Watchdog     Ask", "↩ Back to settings", "Watchdog"],
+	])("returns from %s on %s and only closes on root dismissal", async (category, choice, page) => {
+		const h = makeHarness();
+		await h.sessionStart();
+		h.ui.select.mockResolvedValueOnce(category).mockResolvedValueOnce(choice).mockResolvedValueOnce(undefined);
+		await h.command("");
+		expect(h.ui.select.mock.calls.map(([title]) => title)).toEqual([
+			"Bash Guard  /  Session settings",
+			`Bash Guard  /  ${page}\n● Current mode   ·   Esc to go back`,
+			"Bash Guard  /  Session settings",
+		]);
+		expect(h.entries).toEqual([]);
+	});
+
+	it("keeps the chosen watchdog mode when off and restores it when turned on again", async () => {
+		const h = makeHarness();
+		await h.sessionStart();
+		await h.command("watchdog auto-stop");
+		await h.command("watchdog off");
+		const restored = makeHarness({ branch: h.branch() });
+		await restored.sessionStart("resume");
+		await restored.command("watchdog on");
+		expect(restored.ui.notify.mock.lastCall![0]).toBe("Guard: ask · Watchdog: auto-stop");
+		await restored.command("watchdog ask");
+		expect(restored.entries.at(-1)!.data).toEqual({ watchdog: true, watchdogStopMode: "ask" });
+	});
 	it("completes only the supported grammar", () => {
 		const h = makeHarness();
-		expect(h.completions("")).toEqual(["ask", "deny", "off", "watchdog on", "watchdog off"].map((value) => ({ value, label: value })));
+		expect(h.completions("")).toEqual(["ask", "deny", "off", "watchdog on", "watchdog off", "watchdog ask", "watchdog notify-only", "watchdog auto-stop", "status"].map((value) => ({ value, label: value })));
 		expect(h.completions("watchdog o")).toEqual(["watchdog on", "watchdog off"].map((value) => ({ value, label: value })));
 		expect(h.completions("guard")).toEqual([]);
-		expect(h.completions("status")).toEqual([]);
+		expect(h.completions("status")).toEqual([{ value: "status", label: "status" }]);
 	});
 
 	it("switches ask/deny/off without changing the watchdog", async () => {
@@ -542,7 +612,7 @@ describe("session settings commands", () => {
 		expect(h.ui.select).not.toHaveBeenCalled();
 		await h.command("off");
 		expect(runtime()!.guardEnabled).toBe(false);
-		expect(h.ui.notify).toHaveBeenLastCalledWith("Guard: off · Watchdog: on", "info");
+		expect(h.ui.notify).toHaveBeenLastCalledWith("Guard: off · Watchdog: ask", "info");
 		await h.command("ask");
 		expect(runtime()).toMatchObject({ approvalMode: "ask", guardEnabled: true });
 		h.ui.select.mockResolvedValueOnce("Allow once");
@@ -562,28 +632,39 @@ describe("session settings commands", () => {
 		expect(h.entries.at(-1)!.data).toEqual({ guard: "deny", watchdog: false });
 		await h.command("watchdog on");
 		expect(h.entries.at(-1)!.data).toEqual({ guard: "deny", watchdog: true });
-		expect(h.ui.notify).toHaveBeenLastCalledWith("Guard: deny · Watchdog: on", "info");
+		expect(h.ui.notify).toHaveBeenLastCalledWith("Guard: deny · Watchdog: ask", "info");
 	});
 
-	it.each(["on", "guard on", "guard off", "guard ask", "prompt", "deny extra", "off extra", "ask extra", "status", "status extra", "watchdog", "watchdog ask", "watchdog on extra"])("rejects %s without changing or saving state", async (args) => {
+	it.each(["on", "guard on", "guard off", "guard ask", "prompt", "deny extra", "off extra", "ask extra", "status extra", "watchdog", "watchdog notify", "watchdog on extra"])("rejects %s without changing or saving state", async (args) => {
 		const h = makeHarness();
 		await h.sessionStart();
 		await h.command(args);
 		expect(h.entries).toEqual([]);
 		expect(runtime()).toMatchObject({ approvalMode: "ask", guardEnabled: true });
-		expect(h.ui.notify).toHaveBeenLastCalledWith("usage: /bash-guard [ask|deny|off|watchdog on|off]", "warning");
+		expect(h.ui.notify).toHaveBeenLastCalledWith("usage: /bash-guard [status|ask|deny|off|watchdog on|off|ask|notify-only|auto-stop]", "warning");
 	});
 
-	it("bare invocation reports effective state and sources without saving", async () => {
+	it("status reports effective state and sources without saving", async () => {
 		const h = makeHarness();
 		await h.sessionStart();
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("approval: ask (config)");
+		await h.command("status");
+		const details = h.ui.notify.mock.lastCall![0] as string;
+		expect(details.split("\n").filter((line) => line && !line.startsWith(" "))).toEqual([
+			"Bash Guard · Status",
+			"Guard: ask · Watchdog: ask · Jev: off (rules-only)",
+			"── Guard ──",
+			"── Watchdog ──",
+			"── Jev classifier ──",
+			"── Configuration ──",
+		]);
+		expect(details).toContain("Watching       0 running");
+		expect(details).toContain("Stop rule      2 consecutive checks ≥ 0.8 confidence");
+		expect(details).not.toContain("│");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Mode           ask (config)");
 		expect(h.entries).toEqual([]);
 		await h.command("deny");
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("approval: deny (session)");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("session deny");
+		await h.command("status");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Mode           deny (session)");
 		expect(h.entries).toHaveLength(1);
 	});
 
@@ -597,8 +678,8 @@ describe("session settings commands", () => {
 		const restored = makeHarness({ branch });
 		await restored.sessionStart(reason);
 		expect(runtime()).toMatchObject({ approvalMode: "deny", guardEnabled: true });
-		await restored.command("");
-		expect(restored.ui.notify.mock.calls.at(-1)![0]).toContain("watchdog: off");
+		await restored.command("status");
+		expect(restored.ui.notify.mock.calls.at(-1)![0]).toContain("\n── Watchdog ──\n  Mode           off (disabled in session; stop mode: ask)");
 		expect(restored.entries).toEqual([]);
 	});
 
@@ -607,13 +688,13 @@ describe("session settings commands", () => {
 		await h.sessionStart();
 		expect(runtime()!.approvalMode).toBe("deny");
 		await h.command("ask");
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("approval: ask (session)");
+		await h.command("status");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Mode           ask (session)");
 		await h.sessionStart("new");
 		expect(runtime()!.approvalMode).toBe("deny");
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("approval: deny (config)");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("watchdog: off");
+		await h.command("status");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Mode           deny (config)");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("\n── Watchdog ──\n  Mode           off (disabled in config)");
 	});
 
 	it("does not pin untouched guard settings when toggling the watchdog", async () => {
@@ -653,7 +734,7 @@ describe("session settings commands", () => {
 		await h.command("ask");
 		expect(runtime()).toMatchObject({ approvalMode: "deny", guardEnabled: true, envEnforced: true });
 		expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("stays on in deny mode"), "warning");
-		await h.command("");
+		await h.command("status");
 		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain(env === "deny" ? "env enforced" : "fail closed");
 	});
 
@@ -664,8 +745,8 @@ describe("session settings commands", () => {
 		await h.command("deny");
 		expect(runtime()!.approvalMode).toBe("ask");
 		expect(h.ui.notify).toHaveBeenCalledWith(expect.stringContaining("approval remains ask"), "warning");
-		await h.command("");
-		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("approval: ask (env via PI_BASH_GUARD_APPROVAL_MODE)");
+		await h.command("status");
+		expect(h.ui.notify.mock.calls.at(-1)![0]).toContain("Mode           ask (env via PI_BASH_GUARD_APPROVAL_MODE)");
 		await h.command("off");
 		expect(runtime()!.guardEnabled).toBe(false);
 	});

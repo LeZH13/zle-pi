@@ -15,12 +15,12 @@ afterEach(async () => {
 	vi.unstubAllEnvs();
 });
 
-async function harness(options: { watchdog?: boolean; after?: string } = {}) {
+async function harness(options: { watchdog?: boolean; after?: string; stopMode?: "ask" | "auto-stop"; hasUI?: boolean } = {}) {
 	const cwd = mkdtempSync(join(tmpdir(), "bash-background-"));
 	const agentDir = join(cwd, "agent");
 	mkdirSync(agentDir);
 	writeFileSync(join(agentDir, "bash-guard.json"), JSON.stringify({
-		watchdog: { enabled: options.watchdog ?? false, firstCheckSec: 5, agreeChecks: 1 },
+		watchdog: { enabled: options.watchdog ?? false, firstCheckSec: 5, agreeChecks: 1, stopMode: options.stopMode },
 		guard: { extraRiskyPatterns: ["background_risky"] },
 	}));
 	vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
@@ -43,8 +43,9 @@ async function harness(options: { watchdog?: boolean; after?: string } = {}) {
 			},
 		})),
 	};
+	const ui = { select: vi.fn(), notify: vi.fn(), setStatus: vi.fn(), setWidget: vi.fn() };
 	const ctx = {
-		cwd, hasUI: false, mode: "rpc", modelRegistry: registry,
+		cwd, hasUI: options.hasUI ?? false, mode: "rpc", modelRegistry: registry, ui,
 		sessionManager: { getBranch: () => [], getSessionId: () => "background-test", getSessionFile: () => undefined },
 	} as unknown as ExtensionContext;
 	const pi = {
@@ -80,7 +81,7 @@ async function harness(options: { watchdog?: boolean; after?: string } = {}) {
 		if (tool.outputSchema && !result.isError) expect(Value.Check(tool.outputSchema, result.structuredContent)).toBe(true);
 		return result;
 	}
-	return { call, emit, sendMessage, tools, registry };
+	return { call, emit, sendMessage, tools, registry, ui };
 }
 
 const command = (code: string) => `${JSON.stringify(process.execPath)} -e '${code}'`;
@@ -132,11 +133,34 @@ it("preserves explicit backgrounding for nested bash calls", async () => {
 });
 
 it("lets the watchdog terminate a background command after the original tool returns", async () => {
-	const h = await harness({ watchdog: true });
+	const h = await harness({ watchdog: true, stopMode: "auto-stop" });
 	await h.call("bash", { command: idleCommand, background: true });
 	await vi.waitFor(() => expect(h.sendMessage).toHaveBeenCalledTimes(1), WAIT);
 	expect(h.sendMessage.mock.calls[0]![0].details).toMatchObject({ state: "failed", output: expect.stringContaining("Jev judged") });
 	expect(h.registry.classify).toHaveBeenCalled();
+}, 20_000);
+
+it("serializes watchdog decisions and only stops the approved background command", async () => {
+	const h = await harness({ watchdog: true, hasUI: true });
+	let chooseFirst!: (choice?: string) => void;
+	h.ui.select.mockImplementationOnce(() => new Promise<string | undefined>((resolve) => { chooseFirst = resolve; }));
+	h.ui.select.mockResolvedValueOnce("Stop command");
+	const first = await h.call("bash", { command: idleCommand, background: true });
+	const second = await h.call("bash", { command: idleCommand, background: true });
+	await vi.waitFor(() => expect(h.ui.setStatus).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("2 awaiting decision")), WAIT);
+	expect(h.ui.select).toHaveBeenCalledOnce();
+	const firstId = (first.structuredContent as { job_id: string }).job_id;
+	const secondId = (second.structuredContent as { job_id: string }).job_id;
+	expect(h.ui.select.mock.calls[0]![0]).toContain(firstId);
+	expect(h.ui.select.mock.calls[0]![0]).toContain("Jev judged");
+	expect(h.ui.select.mock.calls[0]![1]).toEqual(["Keep running", "Stop command"]);
+	expect(h.sendMessage).not.toHaveBeenCalled();
+	chooseFirst(undefined);
+	await vi.waitFor(() => expect(h.sendMessage).toHaveBeenCalledOnce(), WAIT);
+	expect(h.ui.select.mock.calls[1]![0]).toContain(secondId);
+	expect(h.sendMessage.mock.calls[0]![0].details).toMatchObject({ job_id: secondId, state: "failed", output: expect.stringContaining("Jev judged") });
+	expect((await h.call("bash_jobs", { action: "status", job_id: firstId })).structuredContent)
+		.toMatchObject({ jobs: [{ state: "running" }] });
 }, 20_000);
 
 it("cancels a real process group through bash_jobs without killing it on turn abort", async () => {

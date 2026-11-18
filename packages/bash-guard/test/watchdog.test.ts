@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import type { Jev, WatchdogJevResult } from "../src/jev.js";
-import { Watchdog, type WatchdogHandle } from "../src/watchdog.js";
+import { Watchdog, type WatchdogDeps, type WatchdogHandle } from "../src/watchdog.js";
 
 const FIRST_MS = DEFAULT_CONFIG.watchdog.firstCheckSec * 1000;
 const INTERVAL_MS = DEFAULT_CONFIG.watchdog.intervalSec * 1000;
@@ -52,9 +52,13 @@ interface Harness {
 	jev: ReturnType<typeof fakeJev>;
 }
 
-function setup(script: JevScript | WatchdogJevResult, configOverrides: Partial<typeof DEFAULT_CONFIG.watchdog> = {}): Harness {
+function setup(
+	script: JevScript | WatchdogJevResult,
+	configOverrides: Partial<typeof DEFAULT_CONFIG.watchdog> = {},
+	approveStop?: WatchdogDeps["approveStop"],
+): Harness {
 	const config = structuredClone(DEFAULT_CONFIG);
-	Object.assign(config.watchdog, configOverrides);
+	Object.assign(config.watchdog, { stopMode: "auto-stop" }, configOverrides);
 	const steer = vi.fn();
 	const notify = vi.fn();
 	const abort = vi.fn();
@@ -65,6 +69,7 @@ function setup(script: JevScript | WatchdogJevResult, configOverrides: Partial<t
 		now: () => Date.now(),
 		steer,
 		notify,
+		approveStop,
 	});
 	const entry = watchdog.start("tail -f /tmp/app.log", "/work", { abort });
 	return { watchdog, steer, notify, abort, entry, jev };
@@ -76,6 +81,89 @@ beforeEach(() => {
 
 afterEach(() => {
 	vi.useRealTimers();
+});
+
+describe("watchdog stop decisions", () => {
+	it("warns once in notify-only mode without asking, steering, or stopping the command", async () => {
+		const approveStop = vi.fn(async () => true);
+		const h = setup({ status: "stuck", pStatus: 0.95, persistent: 0 }, { stopMode: "notify-only" }, approveStop);
+		await vi.advanceTimersByTimeAsync(FIRST_MS + INTERVAL_MS * 4);
+		expect(h.notify).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("stuck (confidence 0.95) across 2 consecutive checks"), "warning");
+		expect(h.notify.mock.lastCall![0]).toContain(h.entry.command);
+		expect(approveStop).not.toHaveBeenCalled();
+		expect(h.abort).not.toHaveBeenCalled();
+		expect(h.steer).not.toHaveBeenCalled();
+		expect(h.watchdog.runningCount()).toBe(1);
+		expect(h.watchdog.getLog(h.entry.command).at(-1)?.outcome).toBe("notified");
+	});
+
+	it("withdraws a pending recommendation rather than applying a newly selected policy to it", async () => {
+		let approve!: (answer: boolean) => void;
+		let signal!: AbortSignal;
+		const h = setup({ status: "stuck", pStatus: 0.95, persistent: 0 }, { stopMode: "ask", agreeChecks: 1 },
+			(_recommendation, current) => {
+				signal = current;
+				return new Promise<boolean>((resolve) => { approve = resolve; });
+			});
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		h.watchdog.withdrawStopDecisions();
+		expect(signal.aborted).toBe(true);
+		expect(h.watchdog.live()?.pendingDecisions).toBeUndefined();
+		approve(true);
+		await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+		expect(h.abort).not.toHaveBeenCalled();
+		expect(h.jev.states).toHaveLength(1);
+	});
+	it("waits for explicit approval and explains the evidence", async () => {
+		let resolve!: (approved: boolean) => void;
+		const approveStop = vi.fn(() => new Promise<boolean>((done) => { resolve = done; }));
+		const h = setup({ status: "stuck", pStatus: 0.95, persistent: 0 }, { stopMode: "ask" }, approveStop);
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		expect(approveStop).not.toHaveBeenCalled();
+		await vi.advanceTimersByTimeAsync(INTERVAL_MS);
+		expect(approveStop).toHaveBeenCalledWith(expect.objectContaining({
+			command: h.entry.command,
+			reason: expect.stringContaining("stuck (confidence 0.95) across 2 consecutive checks"),
+			elapsedSeconds: (FIRST_MS + INTERVAL_MS) / 1000,
+		}), expect.any(AbortSignal));
+		expect(h.watchdog.live()?.pendingDecisions).toBe(1);
+		expect(h.abort).not.toHaveBeenCalled();
+		resolve(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(h.abort).toHaveBeenCalledOnce();
+		expect(h.watchdog.live()?.pendingDecisions).toBeUndefined();
+	});
+
+	it.each(["declined", "unavailable", "failed"])("keeps the command running when the decision is %s", async (outcome) => {
+		const approveStop = vi.fn(async () => {
+			if (outcome === "failed") throw new Error("dialog unavailable");
+			return false;
+		});
+		const h = setup({ status: "stuck", pStatus: 0.95, persistent: 0 }, { stopMode: "ask" },
+			outcome === "unavailable" ? undefined : approveStop);
+		await vi.advanceTimersByTimeAsync(FIRST_MS + INTERVAL_MS * 3);
+		expect(h.abort).not.toHaveBeenCalled();
+		expect(h.jev.states).toHaveLength(2);
+		expect(h.watchdog.getLog(h.entry.command).at(-1)?.outcome).toBe("kept running");
+	});
+
+	it.each(["finish", "dispose"] as const)("withdraws a pending decision on %s and ignores late approval", async (stop) => {
+		let resolve!: (approved: boolean) => void;
+		let signal!: AbortSignal;
+		const h = setup({ status: "stuck", pStatus: 0.95, persistent: 0 }, { stopMode: "ask", agreeChecks: 1 },
+			(_recommendation, current) => {
+				signal = current;
+				return new Promise<boolean>((done) => { resolve = done; });
+			});
+		await vi.advanceTimersByTimeAsync(FIRST_MS);
+		if (stop === "finish") h.watchdog.finish(h.entry);
+		else h.watchdog.dispose();
+		expect(signal.aborted).toBe(true);
+		resolve(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(h.abort).not.toHaveBeenCalled();
+		expect(h.watchdog.live()).toBeUndefined();
+	});
 });
 
 describe("watchdog state machine", () => {
@@ -125,6 +213,7 @@ describe("watchdog state machine", () => {
 		let calls = 0;
 		const script = fakeJev({ ok: true, status: "stuck", pStatus: 0.95, persistent: 0, model: "t" });
 		const config = structuredClone(DEFAULT_CONFIG);
+		config.watchdog.stopMode = "auto-stop";
 		const steer = vi.fn();
 		const notify = vi.fn();
 		const abort = vi.fn();
@@ -168,6 +257,7 @@ describe("watchdog state machine", () => {
 		let calls = 0;
 		const script = fakeJev({ ok: true, status: "stuck", pStatus: 0.95, persistent: 0, model: "t" });
 		const config = structuredClone(DEFAULT_CONFIG);
+		config.watchdog.stopMode = "auto-stop";
 		const steer = vi.fn();
 		const notify = vi.fn();
 		const abort = vi.fn();

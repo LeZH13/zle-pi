@@ -28,13 +28,21 @@ export interface GuardConfig {
 	allowPatterns: string[];
 }
 
+export const WATCHDOG_STOP_MODES = ["ask", "notify-only", "auto-stop"] as const;
+export type WatchdogStopMode = typeof WATCHDOG_STOP_MODES[number];
+
+export function isWatchdogStopMode(value: unknown): value is WatchdogStopMode {
+	return WATCHDOG_STOP_MODES.some((mode) => mode === value);
+}
+
 export interface WatchdogConfig {
 	enabled: boolean;
+	stopMode: WatchdogStopMode;
 	firstCheckSec: number;
 	intervalSec: number;
 	/** Minimum probability of a chosen stuck/looping status to count as an agreeing check. */
 	confidence: number;
-	/** Consecutive agreeing checks required before a kill. */
+	/** Consecutive agreeing checks required before recommending a stop. */
 	agreeChecks: number;
 }
 
@@ -72,6 +80,7 @@ export const DEFAULT_CONFIG: BashGuardConfig = {
 	},
 	watchdog: {
 		enabled: true,
+		stopMode: "ask",
 		firstCheckSec: 120,
 		intervalSec: 300,
 		confidence: 0.8,
@@ -96,6 +105,7 @@ const FileSchema = Type.Object({
 	watchdog: Type.Optional(
 		Type.Object({
 			enabled: Type.Optional(Type.Boolean()),
+			stopMode: Type.Optional(Type.Union(WATCHDOG_STOP_MODES.map((mode) => Type.Literal(mode)))),
 			firstCheckSec: Type.Optional(Type.Number({ minimum: 5 })),
 			intervalSec: Type.Optional(Type.Number({ minimum: 5 })),
 			confidence: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
@@ -172,16 +182,20 @@ const PROJECT_GUARD_KEYS = ["enabled", "approvalMode", "allowBelow", "allowPatte
  * exactly what the guard is meant to protect against: a repo must be able to
  * tighten scrutiny for itself, never to switch the guard off or whitelist
  * commands. Tightening is `extraRiskyPatterns`, a lower `allowBelow`, a stricter
- * `approvalMode`, or `enabled: true`.
+ * `approvalMode`, or `enabled: true`. Projects also may not opt into automatic watchdog stops.
  */
 export function restrictProjectConfig(
 	file: PartialConfig,
 	base: BashGuardConfig,
 ): { override: PartialConfig; ignored: string[] } {
-	const section = file.guard;
-	if (!isPlainObject(section)) return { override: file, ignored: [] };
-	const guard: Record<string, unknown> = { ...section };
+	const override: PartialConfig = { ...file };
 	const ignored: string[] = [];
+	if (base.watchdog.stopMode !== "auto-stop" && isPlainObject(file.watchdog) && file.watchdog.stopMode === "auto-stop") {
+		const { stopMode: _, ...watchdog } = file.watchdog;
+		override.watchdog = watchdog;
+		ignored.push("watchdog.stopMode");
+	}
+	const guard: Record<string, unknown> = isPlainObject(file.guard) ? { ...file.guard } : {};
 	for (const key of PROJECT_GUARD_KEYS) {
 		if (!(key in guard)) continue;
 		const value = guard[key];
@@ -196,7 +210,6 @@ export function restrictProjectConfig(
 		}
 	}
 	if (ignored.length === 0) return { override: file, ignored };
-	const override: PartialConfig = { ...file };
 	if (Object.keys(guard).length > 0) override.guard = guard;
 	else delete override.guard;
 	return { override, ignored };

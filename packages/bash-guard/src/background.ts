@@ -77,7 +77,7 @@ export class BackgroundBash {
 		afterMs: number;
 		signal?: AbortSignal;
 		onUpdate?: (result: BashResult) => void;
-		run: (signal: AbortSignal, update: (result: BashResult) => void) => Promise<BashResult>;
+		run: (signal: AbortSignal, update: (result: BashResult) => void, jobId: string) => Promise<BashResult>;
 	}): Promise<BashResult> {
 		if (options.signal?.aborted) throw new Error("Command aborted");
 		if (this.activeCount() >= MAX_RUNNING) throw new Error(`At most ${MAX_RUNNING} bash commands may run at once`);
@@ -94,7 +94,7 @@ export class BackgroundBash {
 			job.snapshot = snapshot(result);
 			if (!job.background) options.onUpdate?.(result);
 		};
-		const execution: Promise<Outcome> = Promise.resolve().then(() => options.run(job.controller.signal, update)).then(
+		const execution: Promise<Outcome> = Promise.resolve().then(() => options.run(job.controller.signal, update, job.id)).then(
 			(result) => ({ result }), (error: unknown) => ({ error }),
 		);
 		job.done = execution.then((outcome) => {

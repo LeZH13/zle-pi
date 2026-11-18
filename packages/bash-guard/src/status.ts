@@ -9,8 +9,11 @@
  * label, so it never shows a misleading "ask").
  */
 import { stripTerminalSequences, truncateToWidth } from "@earendil-works/pi-tui";
+import { APPROVAL_MODE_ENV, type ApprovalMode, type WatchdogStopMode } from "./config.js";
 import type { JevFailureReason } from "./jev.js";
-import type { WatchLive } from "./watchdog.js";
+import { redactSecrets } from "./redact.js";
+import type { GuardMode } from "./state.js";
+import type { WatchCheckRecord, WatchLive } from "./watchdog.js";
 
 /** Risky-command decisions this session. */
 export interface GuardTally {
@@ -107,6 +110,9 @@ export function chipCommand(command: string, maxLen = 16): string {
 }
 
 function renderLive(live: WatchLive, dim: (text: string) => string, warning: (text: string) => string): string {
+	if (live.pendingDecisions) {
+		return `${dim(`⏱ ${live.running} watched · `)}${warning(`${live.pendingDecisions} awaiting decision`)}`;
+	}
 	const elapsed = formatElapsed(live.elapsedSeconds);
 	const check = live.check;
 	if (!check) {
@@ -130,7 +136,199 @@ function styleVerdict(
 ): string {
 	if (check.service) return dim("service");
 	const verdict = `${check.status} ${prob(check.p)}`;
-	if (check.agree > 0) return warning(`${verdict} (${check.agree}/${check.agreeNeeded} to kill)`);
+	if (check.agree > 0) return warning(`${verdict} (${check.agree}/${check.agreeNeeded} agree)`);
 	const bad = check.status === "stuck" || check.status === "looping";
 	return bad ? warning(verdict) : dim(verdict);
+}
+
+/** Snapshot needed to render the `/bash-guard status` details view. */
+export interface StatusDetailsInput {
+	guard: {
+		mode: GuardMode;
+		approvalMode: ApprovalMode;
+		approvalSource: "config" | "session" | "env";
+		envEnforced: boolean;
+		envError?: string;
+		configEnabled: boolean;
+		sessionSetting?: GuardMode;
+		allowBelow: number;
+		sessionAllowedCount: number;
+		allowPatternCount: number;
+		extraRiskyPatternCount: number;
+		tally: GuardTally;
+	};
+	watchdog: {
+		on: boolean;
+		stopMode: WatchdogStopMode;
+		stopModeSource: "config" | "session";
+		configEnabled: boolean;
+		sessionSetting?: boolean;
+		running: number;
+		pendingDecisions: number;
+		bashConflict: boolean;
+		bashRegistered: boolean;
+		firstCheckSec: number;
+		intervalSec: number;
+		agreeChecks: number;
+		confidence: number;
+	};
+	jev: {
+		available: boolean;
+		model?: string;
+		unavailableReason?: string;
+		timeoutMs: number;
+		lastFailure?: JevFailureReason;
+		usage: { totalTokens: number; cost: number };
+	};
+	config: {
+		flagDisabled: boolean;
+		files: readonly string[];
+		ignoredProjectKeys?: { path: string; keys: readonly string[] };
+	};
+	recentChecks: readonly { command: string; checks: readonly WatchCheckRecord[] }[];
+}
+
+const DETAILS_LABEL_WIDTH = 14;
+
+function detailsRow(label: string, value: string | number): string {
+	return `  ${label.padEnd(DETAILS_LABEL_WIDTH)} ${value}`;
+}
+
+function detailsSection(title: string): string {
+	return `── ${title} ──`;
+}
+
+function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+	return `${count} ${count === 1 ? singular : pluralForm}`;
+}
+
+function formatGuardMode(guard: StatusDetailsInput["guard"], flagDisabled: boolean): string {
+	if (guard.envError) return `⚠ deny (fail closed: ${guard.envError})`;
+	if (guard.mode !== "off") {
+		const source = guard.envEnforced
+			? `env enforced via ${APPROVAL_MODE_ENV}`
+			: guard.approvalSource === "env"
+				? `env via ${APPROVAL_MODE_ENV}`
+				: guard.approvalSource;
+		return `${guard.mode} (${source})`;
+	}
+	if (flagDisabled) return "off (disabled by --no-bash-guard)";
+	if (!guard.configEnabled) return "off (disabled in config)";
+	if (guard.sessionSetting === "off") {
+		return guard.approvalSource === "env"
+			? `off (disabled in session; env approval: ${guard.approvalMode})`
+			: "off (disabled in session)";
+	}
+	return "off";
+}
+
+function formatWatchdogMode(watchdog: StatusDetailsInput["watchdog"], flagDisabled: boolean): string {
+	if (watchdog.on) return `${watchdog.stopMode} (${watchdog.stopModeSource})`;
+	if (flagDisabled) return "off (disabled by --no-bash-guard)";
+	if (!watchdog.configEnabled) return "off (disabled in config)";
+	if (watchdog.sessionSetting === false) return `off (disabled in session; stop mode: ${watchdog.stopMode})`;
+	return "off";
+}
+
+/** Format one recent watchdog check line for the status details view. */
+export function formatWatchCheck(check: WatchCheckRecord): string {
+	const p = check.status === undefined ? undefined : check.probabilities?.[check.status];
+	const statusText = check.status === undefined
+		? undefined
+		: p === undefined ? check.status : `${check.status} (${p.toFixed(2)})`;
+	const outcome = commandPreview(check.outcome);
+	const parts = [
+		statusText,
+		check.persistent === undefined ? undefined : `service ${check.persistent.toFixed(2)}`,
+		outcome.startsWith("failed:") ? `⚠ ${outcome}` : outcome,
+	].filter(Boolean);
+	return `${formatElapsed(check.elapsedSeconds).padEnd(6)} ${parts.join(" · ")}`;
+}
+
+/** Render the multi-section status details shown by `/bash-guard status` and "View details". */
+export function renderStatusDetails(input: StatusDetailsInput): string {
+	const alerts: string[] = [];
+	if (input.config.flagDisabled) alerts.push("⚠ --no-bash-guard");
+	if (input.guard.envError) alerts.push("⚠ fail closed");
+	if (input.watchdog.on && input.watchdog.bashConflict) alerts.push("⚠ bash conflict");
+	if (input.jev.lastFailure) alerts.push(`⚠ jev: ${input.jev.lastFailure}`);
+	if (input.config.ignoredProjectKeys) alerts.push("⚠ project keys ignored");
+
+	const summary = [
+		`Guard: ${input.guard.mode}`,
+		`Watchdog: ${input.watchdog.on ? input.watchdog.stopMode : "off"}`,
+		`Jev: ${input.jev.available ? "on" : "off (rules-only)"}`,
+		...alerts,
+	].join(" · ");
+
+	const watching = input.watchdog.pendingDecisions > 0
+		? `${input.watchdog.running} running · ⚠ ${input.watchdog.pendingDecisions} awaiting decision`
+		: `${input.watchdog.running} running`;
+
+	const bashOverride = input.watchdog.bashConflict
+		? "⚠ unavailable (owned by another extension)"
+		: input.watchdog.bashRegistered ? "active" : "not registered";
+
+	const lines = [
+		"Bash Guard · Status",
+		summary,
+		"",
+		detailsSection("Guard"),
+		detailsRow("Mode", formatGuardMode(input.guard, input.config.flagDisabled)),
+		detailsRow("Decisions", `${input.guard.tally.passed} passed by Jev · ${input.guard.tally.asked} approved · ${input.guard.tally.blocked} blocked`),
+		detailsRow("Allow below", `${input.guard.allowBelow} (risk score)`),
+		detailsRow("Allowlist", `${plural(input.guard.sessionAllowedCount, "session command")} · ${plural(input.guard.allowPatternCount, "config pattern")}`),
+		detailsRow("Extra risky", plural(input.guard.extraRiskyPatternCount, "custom pattern")),
+		"",
+		detailsSection("Watchdog"),
+		detailsRow("Mode", formatWatchdogMode(input.watchdog, input.config.flagDisabled)),
+		detailsRow("Watching", watching),
+		detailsRow("Bash override", bashOverride),
+		detailsRow("Checks", `first at ${input.watchdog.firstCheckSec}s, then every ${input.watchdog.intervalSec}s`),
+		detailsRow("Stop rule", `${plural(input.watchdog.agreeChecks, "consecutive check")} ≥ ${input.watchdog.confidence} confidence`),
+		"",
+		detailsSection("Jev classifier"),
+		detailsRow("Status", input.jev.available ? "on" : "⚠ off"),
+		input.jev.available
+			? detailsRow("Model", input.jev.model ?? "unknown")
+			: detailsRow("Reason", input.jev.unavailableReason ?? "unavailable"),
+		detailsRow("Timeout", `${input.jev.timeoutMs}ms`),
+	];
+
+	if (input.jev.lastFailure) lines.push(detailsRow("Last error", `⚠ ${input.jev.lastFailure}`));
+	if (input.jev.usage.totalTokens > 0) {
+		const cost = input.jev.usage.cost;
+		lines.push(detailsRow("Usage", `${input.jev.usage.totalTokens} tokens · $${cost.toFixed(cost >= 0.01 ? 2 : 4)}`));
+	}
+
+	lines.push("", detailsSection("Configuration"));
+	if (input.config.flagDisabled) {
+		const effect = input.guard.envEnforced
+			? "watchdog disabled; guard stays on in enforced deny mode"
+			: "disables guard & watchdog";
+		lines.push(detailsRow("Launch flag", `⚠ --no-bash-guard (${effect})`));
+	}
+	if (input.config.files.length === 0) {
+		lines.push(detailsRow("Config files", "none (using defaults)"));
+	} else {
+		for (const [index, file] of input.config.files.entries()) {
+			lines.push(detailsRow(index === 0 ? "Config files" : "", file));
+		}
+	}
+	if (input.config.ignoredProjectKeys) {
+		lines.push(
+			detailsRow("Ignored keys", `⚠ ${input.config.ignoredProjectKeys.keys.join(", ")}`),
+			detailsRow("Project file", input.config.ignoredProjectKeys.path),
+		);
+	}
+
+	if (input.recentChecks.length > 0) {
+		lines.push("", detailsSection("Recent watchdog checks"));
+		for (const log of input.recentChecks) {
+			lines.push(`  $ ${truncateToWidth(commandPreview(redactSecrets(log.command)), 64)}`);
+			for (const check of log.checks) lines.push(`    ${formatWatchCheck(check)}`);
+		}
+	}
+
+	return lines.join("\n");
 }

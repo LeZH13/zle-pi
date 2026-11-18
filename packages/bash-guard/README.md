@@ -3,7 +3,7 @@
 A guard and a watchdog for Pi's `bash` tool, both backed by **Jev** (TypeSafe System One, a decision-only classifier), with session-owned background command execution.
 
 - **Guard:** before a risky command runs, Jev judges whether it could cause irreversible loss. Recoverable commands pass; the rest ask you - or are blocked outright in deny mode.
-- **Watchdog:** while a command runs, Jev checks periodically whether it is still making progress. Stuck or looping commands are killed; long-lived services are left alone.
+- **Watchdog:** while a command runs, Jev checks periodically whether it is still making progress. When a command looks stuck or looping, the watchdog can ask, warn without stopping, or stop it automatically. Long-lived services are left alone unless they are looping.
 - **Background jobs:** run a command asynchronously and keep working. Approval checks, native timeout/process cleanup, and watchdog monitoring stay in the same execution path. Completion wakes the agent without polling.
 
 ```sh
@@ -41,7 +41,7 @@ When a job finishes, a `bash-guard-background` custom message reports its ID, co
 
 **Fixed in 0.6.3:** completion messages are collapsed to a compact status and single-line command preview. Press `ctrl+o` to expand the native output. The extra 40-line / 4-KiB background cap has been removed; background completions preserve Pi's native output and truncation notice. UI collapse only changes presentation; the agent still receives the completion payload. Live transcript blocks identify jobs through renderer-visible result details.
 
-**Changed in 0.6.4:** the completion panel shows a colored status, a single-line `$` command preview, up to two sanitized tail lines of output, and either the output line count with `ctrl+o` hint or `(no output)`. Expand to see the job ID, multi-line command formatting, and styled output under the same header. Truncated previews keep the panel background and muted styling behind the ellipsis. Expanded transcript tool blocks also display live output while running and settled output in place.
+**Changed in 0.7.0:** the completion panel shows a colored status, a single-line `$` command preview, up to two sanitized tail lines of output, and either the output line count with `ctrl+o` hint or `(no output)`. Expand to see the job ID, multi-line command formatting, and styled output under the same header. Truncated previews keep the panel background and muted styling behind the ellipsis. Expanded transcript tool blocks also display live output while running and settled output in place.
 
 ### Seeing what is running
 
@@ -183,7 +183,15 @@ The watchdog overrides the `bash` tool with Pi's own local shell operations plus
 - `status`: `progressing`, `waiting`, `stuck`, or `looping`
 - `persistent`: is this a long-lived service (dev server, watcher, log tail) operating normally?
 
-A command is killed after `agreeChecks` (default 2) consecutive `stuck`/`looping` checks at or above `confidence` (default 0.8). Its process tree is terminated, the tool result explains why with a redacted output tail, and the agent is steered not to rerun it unchanged. A failed check resets the count.
+A stop recommendation requires `agreeChecks` (default 2) consecutive `stuck`/`looping` checks at or above `confidence` (default 0.8). A failed check resets the count.
+
+**Changed in 0.7.0:** `watchdog.stopMode` is independent of `guard.approvalMode`:
+
+- **`"ask"` (default):** The panel shows the command, elapsed time, background job ID when applicable, and Jev's verdict, confidence, and agreeing-check count. Pick **Stop command** or **Keep running**. Dismissing the panel or running without a UI leaves the command running without another watchdog prompt for that run. Decisions are shown one at a time and withdrawn if the command exits.
+- **`"notify-only"`:** Warn once, explain the recommendation, and leave the command running. No prompt or automatic stop. Without a UI, there is no visible warning and the command still runs.
+- **`"auto-stop"`:** Stop without asking, as in earlier versions. Set this in your user config to retain automatic stops across sessions, including headless sessions. Project config cannot enable automatic stops on its own.
+
+When the watchdog stops a command, it terminates the process tree, reports why with a redacted output tail, and steers the agent not to rerun the command unchanged. Native timeouts and manual cancellation still work in either mode.
 
 A persistent service (≥ 0.5) is never killed unless it is `looping`. Instead the agent is steered once to background it, e.g. `nohup ... > /tmp/name.log 2>&1 &`.
 
@@ -214,23 +222,27 @@ Resolution remains lazy, so `/login` takes effect without a restart. Pin one wit
 ## Commands
 
 ```
-/bash-guard                  show effective settings and their sources
+/bash-guard                  open Guard, Watchdog, and Status menu (show status without a UI)
+/bash-guard status           show effective settings and their sources
 /bash-guard ask              enable guard; ask on escalation
 /bash-guard deny             enable guard; block on escalation
 /bash-guard off              disable guard only
-/bash-guard watchdog on|off  watchdog only
+/bash-guard watchdog on|off  enable/disable watchdog, remembering its mode
+/bash-guard watchdog ask|notify-only|auto-stop  choose a watchdog mode and enable it
 pi --no-bash-guard           disable both for one run
 ```
 
-Guard mode and watchdog are independent: `ask`, `deny`, and `off` never change the watchdog. Each change confirms the effective state, e.g. `Guard: deny · Watchdog: on`. Deny blocks escalations, not all bash commands.
+In the settings menu, `●` marks the current mode. Press `Esc` or choose **Back to settings** from either submenu to return to the main page. Press `Esc` on the main page to close it.
+
+Guard mode and watchdog are independent: `ask`, `deny`, and `off` never change the watchdog. Each change confirms the effective state, e.g. `Guard: deny · Watchdog: notify-only`. Changing watchdog mode does not stop an already flagged command; it withdraws any pending watchdog decision and applies the new policy to future recommendations. Deny blocks escalations, not all bash commands.
 
 Commands change only this session; they never write config files. Explicit selections persist on the session branch across resume, reload, compaction, and fork, and follow `/tree` navigation. Untouched settings continue using config defaults. New sessions start from config rather than inheriting the previous session's choices. Exact-command approvals remain session-scoped and are ignored in deny mode.
 
 Approval mode precedence is **launch environment → session selection → project config → user config → defaults**. Config `guard.enabled: false` / `watchdog.enabled: false` and `--no-bash-guard` prevent activation; commands warn rather than claim they enabled those components. Enforced launch deny is the exception: the guard stays on, and neither `ask` nor `off` weakens it.
 
-Status shows the effective mode, its source, config/session enablement, the resolved model (or how to enable one), the last classifier failure, session guard decisions, classifier token usage and cost, and recent watchdog checks.
+Detailed status groups effective modes and their sources, thresholds, counters, and configuration into sections for Guard, Watchdog, Jev classifier, and Configuration. Recent watchdog checks are grouped by command, with one line per check.
 
-**Breaking changes in 0.3.0:** use `ask` instead of `prompt` in config and the launch environment. The redundant `status` argument and the old `on` and `guard on|off` commands were removed; `off` now affects only the guard. Old boolean-toggle session entries are no longer restored; reselect the desired settings using the new commands. Old `prompt` config values are invalid, and an old `prompt` launch value fails closed in deny mode.
+**Breaking changes in 0.3.0:** use `ask` instead of `prompt` in config and the launch environment. The old `on` and `guard on|off` commands were removed; `off` now affects only the guard. Old boolean-toggle session entries are no longer restored; reselect the desired settings using the new commands. Old `prompt` config values are invalid, and an old `prompt` launch value fails closed in deny mode.
 
 ## Footer
 
@@ -241,11 +253,11 @@ Dim to blend with Pi's footer; problems use the warning color. The badge is the 
 ⛨ BG deny                                            deny mode; every escalation is blocked
 ⛨ BG ask · 4✓ 1? 1✗                                  risky commands: passed by Jev, asked and allowed, blocked
 ⛨ BG ask · ⏱ 3:10 progressing .92                    running: elapsed, latest verdict and probability
-⛨ BG ask · ⏱ 7:05 stuck .88 (1/2 to kill)            1 of 2 agreeing checks needed to kill
+⛨ BG ask · ⏱ 7:05 stuck .88 (1/2 agree)            1 of 2 checks needed for a stop recommendation
 ⛨ BG ask · ⏱ 12:00 service                           long-lived service, won't be killed
 ⛨ BG ask · ⏱2 0:42                                   2 running, none checked yet (oldest timer shown)
 ⛨ BG ask · ⏱2 · pytest 7:05 waiting .81              2 running, spotlighting the highest-priority checked command
-⛨ BG ask · ⏱3 2⚠ · pytest 7:05 stuck .88 (1/2 to kill)  3 running, 2 with warnings, spotlighting the closest to kill
+⛨ BG ask · ⏱3 2⚠ · pytest 7:05 stuck .88 (1/2 agree)  3 running, 2 with warnings, spotlighting the closest to a stop recommendation
 ⛨ BG ask · rules-only · 2?                           no Jev classifier
 ⛨ BG ask · jev ✗ timeout · 4✓                        last Jev call failed; clears on next success
 ⛨ BG ask · guard-only · 4✓                           watchdog off (guard-only next to any badge)
@@ -255,7 +267,7 @@ Dim to blend with Pi's footer; problems use the warning color. The badge is the 
 ⛨ BG off                                             disabled
 ```
 
-The tally counts only risky commands, hides zero buckets, and resets each session. While commands run, a ticking clock replaces it; when multiple commands run concurrently, the watchdog ranks kill countdowns, stuck/looping warnings, and active work ahead of long-lived services and shows `M⚠` whenever two or more commands have warnings.
+The tally counts only risky commands, hides zero buckets, and resets each session. While commands run, a ticking clock replaces it; when multiple commands run concurrently, the watchdog ranks agreeing-check counts, stuck/looping warnings, and active work ahead of long-lived services and shows `M⚠` whenever two or more commands have warnings. Pending stop prompts take precedence, e.g. `⏱ 3 watched · 2 awaiting decision`.
 
 ## Configuration
 
@@ -272,6 +284,7 @@ Set defaults for new sessions in `~/.pi/agent/bash-guard.json`, overridden by `<
   },
   "watchdog": {
     "enabled": true,
+    "stopMode": "ask",
     "firstCheckSec": 120,
     "intervalSec": 300,
     "confidence": 0.8,

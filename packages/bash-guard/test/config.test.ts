@@ -27,6 +27,17 @@ describe("config defaults", () => {
 });
 
 describe("config merge and validation", () => {
+	it("requires user configuration to enable automatic watchdog stops", () => {
+		const userPath = userConfigPath("/agent");
+		const projectPath = projectConfigPath("/proj");
+		const onIgnored = vi.fn();
+		const load = (files: Record<string, string>) =>
+			loadConfig({ agentDir: "/agent", projectDir: "/proj", readFile: file(files), onIgnored }).config;
+		expect(load({ [projectPath]: '{"watchdog":{"stopMode":"auto-stop","firstCheckSec":60}}' }).watchdog)
+			.toMatchObject({ stopMode: "ask", firstCheckSec: 60 });
+		expect(onIgnored).toHaveBeenCalledWith(["watchdog.stopMode"], projectPath);
+		expect(load({ [userPath]: '{"watchdog":{"stopMode":"auto-stop"}}' }).watchdog.stopMode).toBe("auto-stop");
+	});
 	it("merges project over user per section", () => {
 		const userPath = userConfigPath("/agent");
 		const projectPath = projectConfigPath("/proj");

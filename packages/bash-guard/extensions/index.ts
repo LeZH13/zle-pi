@@ -47,6 +47,8 @@ import { BackgroundBash, type JobSnapshot } from "../src/background.js";
 import {
 	APPROVAL_MODE_ENV,
 	DEFAULT_CONFIG,
+	WATCHDOG_STOP_MODES,
+	isWatchdogStopMode,
 	loadConfig,
 	resolveApprovalMode,
 	type ApprovalMode,
@@ -57,9 +59,10 @@ import { createJev, type Jev } from "../src/jev.js";
 import { RISKY_RULES, compilePatterns, type RiskyScan } from "../src/rules.js";
 import { publishRuntimeMarker, readPackageVersion } from "../src/runtime.js";
 import { ALLOW_ENTRY_TYPE, restoreState, SETTINGS_ENTRY_TYPE, type GuardMode, type SessionSettings } from "../src/state.js";
-import { renderStatus, type GuardTally, type StatusStyler, formatElapsed } from "../src/status.js";
+import { renderStatus, renderStatusDetails, type GuardTally, type StatusStyler, formatElapsed } from "../src/status.js";
 import { activeCount, commandPreview, formatExpandedCommand, isActive, outputTailLines, renderCompletionLine, renderExpandedOutput, renderJobLine, renderWidgetView, stripOutputTruncationFooter, type JobStyler, type WidgetRenderResult } from "../src/render.js";
-import { Watchdog, type WatchCheckRecord } from "../src/watchdog.js";
+import { Watchdog } from "../src/watchdog.js";
+import { redactSecrets } from "../src/redact.js";
 
 const FLAG_NAME = "no-bash-guard";
 const COMMAND_NAME = "bash-guard";
@@ -67,7 +70,25 @@ const STATUS_KEY = "bash-guard";
 
 const VERSION = readPackageVersion(import.meta.url);
 
-const ARGUMENT_COMPLETIONS = ["ask", "deny", "off", "watchdog on", "watchdog off"];
+const GUARD_ACTIONS = [
+	["ask", "Ask", "Confirm risky commands"],
+	["deny", "Deny", "Block risky commands"],
+	["off", "Off", "Turn off the guard"],
+] as const;
+
+const WATCHDOG_ACTIONS = [
+	["ask", "Ask", "Confirm before stopping"],
+	["notify-only", "Notify only", "Warn and leave running"],
+	["auto-stop", "Auto-stop", "Stop automatically"],
+	["off", "Off", "Turn off the watchdog"],
+] as const;
+
+const ARGUMENT_COMPLETIONS = [
+	...GUARD_ACTIONS.map(([mode]) => mode),
+	"watchdog on", "watchdog off",
+	...WATCHDOG_STOP_MODES.map((mode) => `watchdog ${mode}`),
+	"status",
+];
 
 /** Bounded toolCallId → score-label map for the transcript score line. */
 const GUARD_SCORE_MAP_LIMIT = 512;
@@ -200,6 +221,14 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 
 	// --- shared session state -------------------------------------------------
 	let ui: ExtensionUIContext | undefined;
+	let dialogTail = Promise.resolve();
+
+	function queueDialog<T>(open: () => Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
+		// Pi has one selector slot. Guard approvals and watchdog decisions must not replace each other.
+		const dialog = dialogTail.then(() => signal?.aborted ? undefined : open());
+		dialogTail = dialog.then(() => {}, () => {});
+		return dialog;
+	}
 	let config: BashGuardConfig = structuredClone(DEFAULT_CONFIG);
 	let configFiles: string[] = [];
 	/** Guard keys a project config asked to loosen; shown so a weakened guard is never silent. */
@@ -268,6 +297,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	// env value fails closed, so config, flags, and session toggles cannot turn
 	// the guard off. The watchdog stays independently toggleable.
 	const guardOn = (): boolean => envEnforced || (!flagDisabled() && config.guard.enabled && sessionSettings.guard !== "off");
+	const watchdogStopMode = () => sessionSettings.watchdogStopMode ?? config.watchdog.stopMode;
 	const watchdogOn = (): boolean => !flagDisabled() && config.watchdog.enabled && (sessionSettings.watchdog ?? true);
 	const guardMode = (): GuardMode => (guardOn() ? approvalMode : "off");
 
@@ -291,8 +321,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	function syncWatchdog(ctx: ExtensionContext): void {
 		ensureBashOverride(ctx.cwd);
 		bashConflict = detectBashConflict();
-		if (watchdogOn()) {
-		} else {
+		if (!watchdogOn()) {
 			watchdog?.dispose();
 			stopStatusTick();
 		}
@@ -549,12 +578,12 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	function ensureBashOverride(cwd: string): void {
 		if (bashRegistered || (flagDisabled() && !guardOn())) return;
 		const inner = createLocalBashOperations();
-		const operations: BashOperations = {
+		const operations = (jobId?: string): BashOperations => ({
 			exec: async (command, execCwd, options) => {
 				if (!watchdogOn()) return inner.exec(command, execCwd, options);
 				const controller = new AbortController();
 				const activeWatchdog = watchdog!;
-				const entry = activeWatchdog.start(command, execCwd, { abort: () => controller.abort() });
+				const entry = activeWatchdog.start(command, execCwd, { abort: () => controller.abort(), jobId });
 				syncStatusTick();
 				refreshStatus();
 				const outer = options.signal;
@@ -584,8 +613,8 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 					refreshStatus();
 				}
 			},
-		};
-		const bash = createBashToolDefinition(cwd, { operations });
+		});
+		const bash = createBashToolDefinition(cwd, { operations: operations() });
 		pi.registerTool({
 			...bash,
 			description: `${bash.description}\nSet background:true to return immediately and continue other work. Unspecified background yields after 60s for direct calls; nested calls (including codemode) wait for completed output by default. background:false forces foreground. Inside codemode, use background:true only when subsequent code does not need completed output. Completion arrives automatically; do not poll. Background commands retain timeout and watchdog enforcement.`,
@@ -606,7 +635,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 					const { background: requested, ...nativeParams } = params;
 					return await background.execute({
 						command: params.command, background: requested ?? (timing.nested ? false : undefined), afterMs: afterSec * 1000, signal, onUpdate,
-						run: (jobSignal, update) => createBashToolDefinition(ctx.cwd, { operations }).execute(toolCallId, nativeParams, jobSignal, update, ctx),
+						run: (jobSignal, update, jobId) => createBashToolDefinition(ctx.cwd, { operations: operations(jobId) }).execute(toolCallId, nativeParams, jobSignal, update, ctx),
 					});
 				} finally {
 					timing.durationMs = performance.now() - startedAt;
@@ -654,7 +683,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			hasUI: ctx.hasUI,
 			approvalMode,
 			select: (title, options, opts) =>
-				ctx.ui.select(title, [...options], opts?.signal === undefined ? undefined : { signal: opts.signal }),
+				queueDialog(() => ctx.ui.select(title, [...options], opts), opts?.signal),
 			notify: (message, type) => {
 				if (ctx.hasUI) ctx.ui.notify(message, type);
 			},
@@ -909,6 +938,21 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			jev,
 			now: () => Date.now(),
 			steer,
+			stopMode: watchdogStopMode,
+			approveStop: async ({ command, jobId, elapsedSeconds, reason }, signal) => {
+				if (!ctx.hasUI) return false;
+				const choice = await queueDialog(() => {
+					const job = jobId && backgroundJobs().find((entry) => entry.job_id === jobId && isActive(entry.state));
+					const identity = job ? ` · ${job.job_id}` : "";
+					const preview = truncateToWidth(commandPreview(redactSecrets(command)), 240);
+					return ctx.ui.select(
+						`Watchdog: stop command?\n$ ${preview}\n${formatElapsed(elapsedSeconds)} elapsed${identity}\n${reason}`,
+						["Keep running", "Stop command"],
+						{ signal },
+					);
+				}, signal);
+				return choice === "Stop command";
+			},
 			notify: (message, type) => notifySafe(message, type),
 		});
 
@@ -966,45 +1010,52 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	}
 
 	function statusLines(): string {
-		const approval = envError
-			? `approval: deny (fail closed - ${envError})`
-			: `approval: ${approvalMode} (${approvalSource}${envEnforced ? " enforced" : ""}${approvalSource === "env" ? ` via ${APPROVAL_MODE_ENV}` : ""})`;
-		const lines = [
-			approval,
-			`guard: ${guardMode()} (config enabled ${config.guard.enabled}, session ${sessionSettings.guard ?? "default"}, flag ${flagDisabled() ? "off" : "on"})`,
-			`watchdog: ${watchdogOn() ? "on" : "off"} (config enabled ${config.watchdog.enabled}, session ${sessionSettings.watchdog === undefined ? "default" : sessionSettings.watchdog ? "on" : "off"}, flag ${flagDisabled() ? "off" : "on"}) - tracking ${watchdog?.runningCount() ?? 0} command(s)` +
-				(bashRegistered ? (bashConflict ? " - override lost to another extension" : " - bash override registered") : " - not overriding bash"),
-			`jev: ${jev.available ? "on" : "off"} - ${jev.available ? jev.model : jev.describeUnavailable()} (timeout ${config.jev.timeoutMs}ms)` +
-				(jev.lastFailure ? ` - last call failed: ${jev.lastFailure}` : ""),
-			`guard decisions (session): ${tally.passed} passed by Jev, ${tally.asked} asked and allowed, ${tally.blocked} blocked`,
-			`first check ${config.watchdog.firstCheckSec}s, interval ${config.watchdog.intervalSec}s, confidence ${config.watchdog.confidence}, agree checks ${config.watchdog.agreeChecks}`,
-			`allowBelow ${config.guard.allowBelow}, session-allowed commands: ${allowedCommands.size}, allow patterns: ${config.guard.allowPatterns.length}, extra risky patterns: ${config.guard.extraRiskyPatterns.length}`,
-			`config: ${configFiles.length > 0 ? configFiles.join(", ") : "defaults (no bash-guard.json found)"}`,
-		];
-		if (ignoredProjectKeys) {
-			lines.push(`⚠ ${ignoredProjectKeys.path} ignored ${ignoredProjectKeys.keys.join(", ")} (project config may only tighten)`);
-		}
-		const usage = jev.usage();
-		if (usage.totalTokens > 0) {
-			lines.push(
-				`classifier usage (session): ${usage.totalTokens} tokens, $${
-					usage.cost >= 0.01 ? usage.cost.toFixed(2) : usage.cost.toFixed(4)
-				}`,
-			);
-		}
-		if (bashConflict) lines.push("⚠ another extension owns the bash override; the watchdog is inert this session");
-		for (const log of watchdog?.recentLogs(5) ?? []) {
-			lines.push(`watch log ${log.command.slice(0, 60)}: ${log.checks.map(formatCheck).join(" | ")}`);
-		}
-		return lines.join("\n");
-	}
-
-	function formatCheck(check: WatchCheckRecord): string {
-		const verdict =
-			check.status === undefined
-				? check.outcome
-				: `${check.status} p=${check.probabilities?.[check.status]?.toFixed(2)} persistent=${check.persistent?.toFixed(2)} ${check.outcome}`;
-		return `[${check.elapsedSeconds}s ${verdict}]`;
+		const watched = watchdog?.live();
+		return renderStatusDetails({
+			guard: {
+				mode: guardMode(),
+				approvalMode,
+				approvalSource,
+				envEnforced,
+				envError,
+				configEnabled: config.guard.enabled,
+				sessionSetting: sessionSettings.guard,
+				allowBelow: config.guard.allowBelow,
+				sessionAllowedCount: allowedCommands.size,
+				allowPatternCount: config.guard.allowPatterns.length,
+				extraRiskyPatternCount: config.guard.extraRiskyPatterns.length,
+				tally,
+			},
+			watchdog: {
+				on: watchdogOn(),
+				stopMode: watchdogStopMode(),
+				stopModeSource: sessionSettings.watchdogStopMode ? "session" : "config",
+				configEnabled: config.watchdog.enabled,
+				sessionSetting: sessionSettings.watchdog,
+				running: watched?.running ?? 0,
+				pendingDecisions: watched?.pendingDecisions ?? 0,
+				bashConflict,
+				bashRegistered,
+				firstCheckSec: config.watchdog.firstCheckSec,
+				intervalSec: config.watchdog.intervalSec,
+				agreeChecks: config.watchdog.agreeChecks,
+				confidence: config.watchdog.confidence,
+			},
+			jev: {
+				available: jev.available,
+				model: jev.model,
+				unavailableReason: jev.available ? undefined : jev.describeUnavailable(),
+				timeoutMs: config.jev.timeoutMs,
+				lastFailure: jev.lastFailure,
+				usage: jev.usage(),
+			},
+			config: {
+				flagDisabled: flagDisabled(),
+				files: configFiles,
+				ignoredProjectKeys,
+			},
+			recentChecks: watchdog?.recentLogs(5) ?? [],
+		});
 	}
 
 	// --- operator controls -----------------------------------------------------
@@ -1015,7 +1066,7 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 	}
 
 	async function confirmAndCancelJob(uiContext: ExtensionUIContext, job: JobSnapshot): Promise<void> {
-		if (!await uiContext.confirm("Cancel background job?", cancelLabel(job))) return;
+		if (!await queueDialog(() => uiContext.confirm("Cancel background job?", cancelLabel(job)))) return;
 		const current = backgroundJobs().find((entry) => entry.job_id === job.job_id);
 		if (!current || !isActive(current.state)) {
 			notifySafe(`bash-guard: ${job.job_id} already finished`, "info");
@@ -1045,11 +1096,16 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 			await confirmAndCancelJob(ctx.ui, active[0]!);
 			return;
 		}
-		const chosen = await ctx.ui.select("Cancel which background job?", active.map((job, index) => cancelLabel(job, index)));
+		const chosen = await queueDialog(() => ctx.ui.select("Cancel which background job?", active.map((job, index) => cancelLabel(job, index))));
 		const target = active.find((job, index) => cancelLabel(job, index) === chosen);
 		if (!target) return;
-		const [cancelled] = background.cancel(target.job_id);
-		notifySafe(`bash-guard: cancelling ${cancelled!.job_id}`, "info");
+		const current = backgroundJobs().find((job) => job.job_id === target.job_id && isActive(job.state));
+		if (!current) {
+			notifySafe(`bash-guard: ${target.job_id} already finished`, "info");
+			return;
+		}
+		background.cancel(current.job_id);
+		notifySafe(`bash-guard: cancelling ${current.job_id}`, "info");
 	}
 
 	pi.registerShortcut("ctrl+shift+k", {
@@ -1068,31 +1124,69 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	async function selectSettingsAction(ctx: ExtensionCommandContext): Promise<string | undefined> {
+		return queueDialog(async () => {
+			const guardModeId = guardMode();
+			const watchModeId = watchdogOn() ? watchdogStopMode() : "off";
+			const guard = `Guard        ${GUARD_ACTIONS.find(([mode]) => mode === guardModeId)![1]}${envEnforced ? " (enforced)" : ""}`;
+			const watch = `Watchdog     ${WATCHDOG_ACTIONS.find(([mode]) => mode === watchModeId)![1]}`;
+			const status = "Status       View details";
+			const back = "↩ Back to settings";
+			while (true) {
+				const category = await ctx.ui.select("Bash Guard  /  Session settings", [guard, watch, status]);
+				if (category === status) return "status";
+				if (category !== guard && category !== watch) return undefined;
+				const isGuard = category === guard;
+				const current = isGuard ? guardModeId : watchModeId;
+				const actions = (isGuard ? GUARD_ACTIONS : WATCHDOG_ACTIONS).map(([mode, title, description]) => ({
+					value: isGuard ? mode : `watchdog ${mode}`,
+					label: `${mode === current ? "●" : "○"} ${title.padEnd(11)}   ${ctx.mode === "tui" ? ctx.ui.theme.fg("dim", description) : description}`,
+				}));
+				const page = isGuard ? "Guard" : "Watchdog";
+				const selected = await ctx.ui.select(
+					`Bash Guard  /  ${page}\n● Current mode   ·   Esc to go back`,
+					[...actions.map(({ label }) => label), back],
+				);
+				if (selected === undefined || selected === back) continue;
+				return actions.find(({ label }) => label === selected)?.value;
+			}
+		});
+	}
+
 	pi.registerCommand(COMMAND_NAME, {
-		description: "Show bash-guard status, set ask/deny/off, or toggle the watchdog",
+		description: "Open Bash Guard settings, change guard/watchdog modes, or show status",
 		getArgumentCompletions: (argumentPrefix: string): AutocompleteItem[] =>
 			ARGUMENT_COMPLETIONS.filter((argument) => argument.startsWith(argumentPrefix)).map((value) => ({ value, label: value })),
 		handler: async (args: string, ctx: ExtensionCommandContext) => {
+			if (!args.trim() && ctx.hasUI) {
+				const selected = await selectSettingsAction(ctx);
+				if (selected === undefined) return;
+				args = selected;
+			}
 			const tokens = args.trim().split(/\s+/).filter(Boolean);
 			const [head, tail] = tokens;
-			if (tokens.length === 0) {
+			if (tokens.length === 0 || (head === "status" && tokens.length === 1)) {
 				notifySafe(statusLines(), "info");
 				refreshStatus(ctx);
 				return;
 			}
 
+			const previousMode = watchdogStopMode();
 			if (tokens.length === 1 && (head === "ask" || head === "deny" || head === "off")) {
 				sessionSettings = { ...sessionSettings, guard: head };
 			} else if (tokens.length === 2 && head === "watchdog" && (tail === "on" || tail === "off")) {
 				sessionSettings = { ...sessionSettings, watchdog: tail === "on" };
+			} else if (tokens.length === 2 && head === "watchdog" && isWatchdogStopMode(tail)) {
+				sessionSettings = { ...sessionSettings, watchdog: true, watchdogStopMode: tail };
 			} else {
-				notifySafe("usage: /bash-guard [ask|deny|off|watchdog on|off]", "warning");
+				notifySafe("usage: /bash-guard [status|ask|deny|off|watchdog on|off|ask|notify-only|auto-stop]", "warning");
 				return;
 			}
 
 			pi.appendEntry(SETTINGS_ENTRY_TYPE, { ...sessionSettings });
 			resolvePolicy();
 			syncRuntime();
+			if (previousMode !== watchdogStopMode()) watchdog?.withdrawStopDecisions();
 			syncWatchdog(ctx);
 			refreshStatus(ctx);
 
@@ -1104,10 +1198,10 @@ export default function bashGuardExtension(pi: ExtensionAPI): void {
 					if (envEnforced) notifyEnforced();
 					else notifySafe(`bash-guard: approval remains ${approvalMode} - set by ${APPROVAL_MODE_ENV}`, "warning");
 				}
-			} else if (tail === "on" && !watchdogOn()) {
+			} else if (head === "watchdog" && tail !== "off" && !watchdogOn()) {
 				notifySafe(`bash-guard: watchdog remains off - ${flagDisabled() ? "--no-bash-guard" : "watchdog.enabled=false in config"}`, "warning");
 			}
-			notifySafe(`Guard: ${guardMode()} · Watchdog: ${watchdogOn() ? "on" : "off"}`, "info");
+			notifySafe(`Guard: ${guardMode()} · Watchdog: ${watchdogOn() ? watchdogStopMode() : "off"}`, "info");
 		},
 	});
 }

@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { formatElapsed, renderStatus, type BashGuardStatusState } from "../src/status.js";
+import {
+	formatElapsed,
+	formatWatchCheck,
+	renderStatus,
+	renderStatusDetails,
+	type BashGuardStatusState,
+	type StatusDetailsInput,
+} from "../src/status.js";
 import type { WatchLive } from "../src/watchdog.js";
 
 const identity = (text: string, _kind: "dim" | "warning") => text;
@@ -78,6 +85,11 @@ describe("footer status: idle tally", () => {
 });
 
 describe("footer status: running", () => {
+	it("shows pending decisions ahead of check verdicts", () => {
+		const input = state({ live: live({ running: 3, pendingDecisions: 2, check: check() }) });
+		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱ 3 watched · 2 awaiting decision");
+		expect(kinds(input)).toContain("warning:2 awaiting decision");
+	});
 	it("replaces the tally with the clock before the first check", () => {
 		expect(renderStatus(state({ tally: { passed: 4, asked: 0, blocked: 0 }, live: live() }), identity)).toBe("⛨ BG ask · ⏱ 0:42");
 	});
@@ -90,8 +102,8 @@ describe("footer status: running", () => {
 
 	it("shows kill progress in warning style", () => {
 		const input = state({ live: live({ warnings: 1, elapsedSeconds: 425, check: check({ status: "stuck", p: 0.88, agree: 1 }) }) });
-		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱ 7:05 stuck .88 (1/2 to kill)");
-		expect(kinds(input)).toContain("warning:stuck .88 (1/2 to kill)");
+		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱ 7:05 stuck .88 (1/2 agree)");
+		expect(kinds(input)).toContain("warning:stuck .88 (1/2 agree)");
 	});
 
 	it("shows a vetoed long-lived service", () => {
@@ -132,10 +144,10 @@ describe("footer status: running", () => {
 				check: check({ status: "stuck", p: 0.88, agree: 1 }),
 			}),
 		});
-		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱3 · pytest -q 7:05 stuck .88 (1/2 to kill)");
+		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱3 · pytest -q 7:05 stuck .88 (1/2 agree)");
 		const seen = kinds(input);
 		expect(seen).toContain("dim:⏱3");
-		expect(seen).toContain("warning:stuck .88 (1/2 to kill)");
+		expect(seen).toContain("warning:stuck .88 (1/2 agree)");
 	});
 
 	it("surfaces a compact multi-warning count when two or more commands warn", () => {
@@ -148,11 +160,11 @@ describe("footer status: running", () => {
 				check: check({ status: "stuck", p: 0.88, agree: 1 }),
 			}),
 		});
-		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱3 2⚠ · pytest 3:10 stuck .88 (1/2 to kill)");
+		expect(renderStatus(input, identity)).toBe("⛨ BG ask · ⏱3 2⚠ · pytest 3:10 stuck .88 (1/2 agree)");
 		const seen = kinds(input);
 		expect(seen).toContain("dim:⏱3");
 		expect(seen).toContain("warning:2⚠");
-		expect(seen).toContain("warning:stuck .88 (1/2 to kill)");
+		expect(seen).toContain("warning:stuck .88 (1/2 agree)");
 	});
 
 	it("keeps a degraded label before the running segment", () => {
@@ -220,5 +232,188 @@ describe("formatElapsed", () => {
 		expect(formatElapsed(0)).toBe("0:00");
 		expect(formatElapsed(65)).toBe("1:05");
 		expect(formatElapsed(3725)).toBe("1:02:05");
+	});
+});
+
+function detailsInput(overrides: {
+	guard?: Partial<StatusDetailsInput["guard"]>;
+	watchdog?: Partial<StatusDetailsInput["watchdog"]>;
+	jev?: Partial<StatusDetailsInput["jev"]>;
+	config?: Partial<StatusDetailsInput["config"]>;
+	recentChecks?: StatusDetailsInput["recentChecks"];
+} = {}): StatusDetailsInput {
+	return {
+		guard: {
+			mode: "ask",
+			approvalMode: "ask",
+			approvalSource: "config",
+			envEnforced: false,
+			configEnabled: true,
+			allowBelow: 0.25,
+			sessionAllowedCount: 0,
+			allowPatternCount: 0,
+			extraRiskyPatternCount: 0,
+			tally: { passed: 0, asked: 0, blocked: 0 },
+			...overrides.guard,
+		},
+		watchdog: {
+			on: true,
+			stopMode: "ask",
+			stopModeSource: "config",
+			configEnabled: true,
+			running: 0,
+			pendingDecisions: 0,
+			bashConflict: false,
+			bashRegistered: true,
+			firstCheckSec: 120,
+			intervalSec: 300,
+			agreeChecks: 2,
+			confidence: 0.8,
+			...overrides.watchdog,
+		},
+		jev: {
+			available: true,
+			model: "openrouter/~typesafe/jev-latest",
+			timeoutMs: 6000,
+			usage: { totalTokens: 0, cost: 0 },
+			...overrides.jev,
+		},
+		config: {
+			flagDisabled: false,
+			files: [],
+			...overrides.config,
+		},
+		recentChecks: overrides.recentChecks ?? [],
+	};
+}
+
+describe("renderStatusDetails", () => {
+	it("renders a concise, scannable default summary and sections", () => {
+		const out = renderStatusDetails(detailsInput());
+		expect(out).toBe([
+			"Bash Guard · Status",
+			"Guard: ask · Watchdog: ask · Jev: on",
+			"",
+			"── Guard ──",
+			"  Mode           ask (config)",
+			"  Decisions      0 passed by Jev · 0 approved · 0 blocked",
+			"  Allow below    0.25 (risk score)",
+			"  Allowlist      0 session commands · 0 config patterns",
+			"  Extra risky    0 custom patterns",
+			"",
+			"── Watchdog ──",
+			"  Mode           ask (config)",
+			"  Watching       0 running",
+			"  Bash override  active",
+			"  Checks         first at 120s, then every 300s",
+			"  Stop rule      2 consecutive checks ≥ 0.8 confidence",
+			"",
+			"── Jev classifier ──",
+			"  Status         on",
+			"  Model          openrouter/~typesafe/jev-latest",
+			"  Timeout        6000ms",
+			"",
+			"── Configuration ──",
+			"  Config files   none (using defaults)",
+		].join("\n"));
+	});
+
+	it("pluralizes counts properly and surfaces warnings, usage, config files, and redacted recent checks", () => {
+		const out = renderStatusDetails(detailsInput({
+			guard: {
+				mode: "deny",
+				approvalMode: "deny",
+				approvalSource: "session",
+				sessionAllowedCount: 1,
+				allowPatternCount: 1,
+				extraRiskyPatternCount: 1,
+				tally: { passed: 4, asked: 1, blocked: 2 },
+			},
+			watchdog: {
+				stopMode: "notify-only",
+				stopModeSource: "session",
+				running: 2,
+				pendingDecisions: 1,
+				bashConflict: true,
+				agreeChecks: 1,
+			},
+			jev: {
+				lastFailure: "timeout",
+				usage: { totalTokens: 1240, cost: 0.0012 },
+			},
+			config: {
+				files: ["/home/u/.pi/agent/bash-guard.json", "/repo/.pi/bash-guard.json"],
+				ignoredProjectKeys: { path: "/repo/.pi/bash-guard.json", keys: ["guard.enabled"] },
+			},
+			recentChecks: [
+				{
+					command: "OPENAI_API_KEY=sk-proj-secret1234567890 npm run dev",
+					checks: [
+						{ elapsedSeconds: 120, status: "progressing", probabilities: { progressing: 0.92 }, persistent: 0.85, outcome: "pass" },
+						{ elapsedSeconds: 420, status: "stuck", probabilities: { stuck: 0.88 }, persistent: 0.12, outcome: "agree 1/2" },
+						{ elapsedSeconds: 720, outcome: "failed: timeout" },
+					],
+				},
+			],
+		}));
+
+		expect(out).toContain("Guard: deny · Watchdog: notify-only · Jev: on · ⚠ bash conflict · ⚠ jev: timeout · ⚠ project keys ignored");
+		expect(out).toContain("  Allowlist      1 session command · 1 config pattern");
+		expect(out).toContain("  Extra risky    1 custom pattern");
+		expect(out).toContain("  Watching       2 running · ⚠ 1 awaiting decision");
+		expect(out).toContain("  Bash override  ⚠ unavailable (owned by another extension)");
+		expect(out).toContain("  Stop rule      1 consecutive check ≥ 0.8 confidence");
+		expect(out).toContain("  Last error     ⚠ timeout");
+		expect(out).toContain("  Usage          1240 tokens · $0.0012");
+		expect(out).toContain("  Config files   /home/u/.pi/agent/bash-guard.json\n                 /repo/.pi/bash-guard.json");
+		expect(out).toContain("  Ignored keys   ⚠ guard.enabled");
+		expect(out).toContain("  Project file   /repo/.pi/bash-guard.json");
+		expect(out).toContain("── Recent watchdog checks ──");
+		expect(out).not.toContain("sk-proj-secret1234567890");
+		expect(out).toContain("    2:00   progressing (0.92) · service 0.85 · pass");
+		expect(out).toContain("    7:00   stuck (0.88) · service 0.12 · agree 1/2");
+		expect(out).toContain("    12:00  ⚠ failed: timeout");
+	});
+
+	it("explains that --no-bash-guard leaves launch-enforced deny active", () => {
+		const out = renderStatusDetails(detailsInput({
+			guard: { mode: "deny", approvalMode: "deny", approvalSource: "env", envEnforced: true },
+			watchdog: { on: false },
+			config: { flagDisabled: true },
+		}));
+		expect(out).toContain("Guard: deny · Watchdog: off");
+		expect(out).toContain("--no-bash-guard (watchdog disabled; guard stays on in enforced deny mode)");
+		expect(out).not.toContain("disables guard & watchdog");
+	});
+
+	it("explains --no-bash-guard and session off overrides clearly", () => {
+		const flagged = renderStatusDetails(detailsInput({
+			guard: { mode: "off" },
+			watchdog: { on: false },
+			config: { flagDisabled: true },
+		}));
+		expect(flagged).toContain("Guard: off · Watchdog: off · Jev: on · ⚠ --no-bash-guard");
+		expect(flagged).toContain("  Mode           off (disabled by --no-bash-guard)");
+		expect(flagged).toContain("  Launch flag    ⚠ --no-bash-guard (disables guard & watchdog)");
+
+		const sessionOff = renderStatusDetails(detailsInput({
+			guard: { mode: "off", approvalSource: "env", approvalMode: "ask", sessionSetting: "off" },
+			watchdog: { on: false, sessionSetting: false },
+		}));
+		expect(sessionOff).toContain("  Mode           off (disabled in session; env approval: ask)");
+		expect(sessionOff).toContain("  Mode           off (disabled in session; stop mode: ask)");
+	});
+});
+
+describe("formatWatchCheck", () => {
+	it("formats checks with and without probabilities", () => {
+		expect(formatWatchCheck({
+			elapsedSeconds: 65,
+			status: "waiting",
+			probabilities: { waiting: 0.81 },
+			persistent: 0.4,
+			outcome: "pass",
+		})).toBe("1:05   waiting (0.81) · service 0.40 · pass");
+		expect(formatWatchCheck({ elapsedSeconds: 300, outcome: "failed: aborted" })).toBe("5:00   ⚠ failed: aborted");
 	});
 });
