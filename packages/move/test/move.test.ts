@@ -18,6 +18,7 @@ describe("move extension", () => {
 		process.chdir(originalCwd);
 		tempDir = join(tmpdir(), `pi-move-cmd-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
+		vi.stubEnv("PI_CODING_AGENT_DIR", join(tempDir, ".pi-agent"));
 
 		// Default SessionManager.listAll to empty array to avoid scanning real ~/.pi/agent/sessions/
 		vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
@@ -38,6 +39,7 @@ describe("move extension", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		vi.restoreAllMocks();
 		try {
 			process.chdir(originalCwd);

@@ -216,7 +216,7 @@ export function matchRecentDirectory(
 		return true;
 	}
 
-	// 2. Prefix match for paths (e.g. user typed "~/zle" or "/Users/zle")
+	// 2. Prefix match for paths (e.g. user typed "~/projects" or "/Users/example")
 	if (lowerDisplay.startsWith(lowerQuery) || lowerAbsolute.startsWith(lowerQuery)) {
 		return true;
 	}

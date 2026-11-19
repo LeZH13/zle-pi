@@ -20,7 +20,7 @@ To keep a local installation:
 pi install ./packages/recap
 ```
 
-After a public release, the npm installation command will be:
+Or install the published package:
 
 ```bash
 pi install npm:@zle13/pi-recap

@@ -22,3 +22,7 @@ pi install npm:@zle13/pi-move
 - **Worktree Session Inheritance:** When inside a linked worktree (e.g. via Herdr), run `/move` to adopt and fork any session from the main repo checkout.
 - **Seamless Context Forking:** Moving to an empty worktree or directory lets you fork your current conversation, rebinding `cwd` while preserving complete message history.
 - **Smart Autocomplete:** Surfaces worktree branches, recent directories, and filesystem paths as you type.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

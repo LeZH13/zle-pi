@@ -53,7 +53,7 @@ Even a single match shows a preview before copying. Clipboard failures leave the
 
 Copying uses Pi's public `copyToClipboard()` utility. Native clipboard failures are reported; remote/headless terminal clipboard delivery via OSC 52 may be best effort and depends on terminal/multiplexer support. This is a terminal-UI-only feature, not an RPC/print-mode clipboard tool.
 
-### Unreleased 0.5.0 changes
+### Changes in 0.5.0
 
 The `$$` / `/copy-command` picker now offers individual top-level commands from multi-command shell fences, plus a labelled whole-block option. Compound commands remain intact; blocks that cannot be split reliably stay whole. Existing filter and copy keybindings are unchanged. The first selection in a splittable block is now its first command rather than the entire block; choose **whole block** to retain the previous copy behavior.
 
@@ -94,3 +94,7 @@ The editor automatically distinguishes modes using the terminal's hardware curso
 - **Normal mode**: Solid block cursor (`\x1b[2 q` steady block, accompanied by software inverse video).
 - **Insert mode**: Vertical line cursor (`\x1b[6 q` steady beam/bar), with software inverse highlighting stripped so the vertical bar renders cleanly.
 - **Shutdown / exit**: Restores the terminal cursor style back to the user's default (`\x1b[0 q`) and restores hardware cursor visibility.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

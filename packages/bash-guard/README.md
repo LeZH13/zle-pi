@@ -338,3 +338,7 @@ The client posts to `<baseUrl>/systemone`. A generic OpenAI chat endpoint is not
 - Quoting inside `$( )` is not tracked for paren balancing, and wrappers are recognized by name, so aliased binaries are not unwrapped.
 - Watchdog thresholds use the chosen status's probability, not Jev's self-reported `confidence`.
 - Deny mode ignores restored session approvals by design; old "Allow for this session" entries only apply in ask mode.
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

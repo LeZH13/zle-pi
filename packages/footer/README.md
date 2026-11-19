@@ -125,4 +125,4 @@ Settings are persisted across sessions in `~/.pi/agent/footer.json`:
 
 ## License
 
-MIT
+[MIT](./LICENSE)

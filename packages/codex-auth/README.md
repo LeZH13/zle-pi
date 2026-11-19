@@ -84,4 +84,4 @@ pi install /path/to/zle-pi/packages/codex-auth
 
 ## License
 
-MIT
+[MIT](./LICENSE)

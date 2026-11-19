@@ -143,4 +143,4 @@ Create `.pi/prompt-snippets.json` (project-level) or `~/.pi/agent/prompt-snippet
 
 ## License
 
-MIT © zle13. Original work © Amos Blomqvist.
+MIT applies to original contributions by zle13. The upstream material is by Amos Blomqvist; its license has not been verified. See [LICENSE](./LICENSE) and [NOTICE](./NOTICE).

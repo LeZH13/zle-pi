@@ -9,19 +9,19 @@ import {
 } from "../extensions/git.js";
 
 describe("git worktree parsing and helpers", () => {
-	const mockPorcelain = `worktree /Users/zle/dotfiles
+	const mockPorcelain = `worktree /Users/testuser/repo
 HEAD 62bf5364e4bded05975ac480397dc2707aa8edfa
 branch refs/heads/master
 
-worktree /Users/zle/.herdr/worktrees/dotfiles/git-alias
+worktree /Users/testuser/worktrees/repo/git-alias
 HEAD 62bf5364e4bded05975ac480397dc2707aa8edfa
 branch refs/heads/git-alias
 
-worktree /Users/zle/.herdr/worktrees/dotfiles/detached-fix
+worktree /Users/testuser/worktrees/repo/detached-fix
 HEAD a1b2c3d4e5f6
 detached
 
-worktree /Users/zle/.herdr/worktrees/dotfiles/prunable-wt
+worktree /Users/testuser/worktrees/repo/prunable-wt
 HEAD 1234567890ab
 branch refs/heads/old-branch
 prunable gitdir file points to non-existent location
@@ -30,14 +30,14 @@ prunable gitdir file points to non-existent location
 	it("parses git worktree porcelain output into structured objects", () => {
 		const worktrees = parseGitWorktreesPorcelain(
 			mockPorcelain,
-			"/Users/zle/.herdr/worktrees/dotfiles/git-alias",
+			"/Users/testuser/worktrees/repo/git-alias",
 		);
 
 		expect(worktrees).toHaveLength(4);
 
 		// First entry is main repo
 		expect(worktrees[0]).toEqual({
-			path: resolve("/Users/zle/dotfiles"),
+			path: resolve("/Users/testuser/repo"),
 			head: "62bf5364e4bded05975ac480397dc2707aa8edfa",
 			branch: "master",
 			isMain: true,
@@ -50,7 +50,7 @@ prunable gitdir file points to non-existent location
 
 		// Second entry is the current worktree
 		expect(worktrees[1]).toEqual({
-			path: resolve("/Users/zle/.herdr/worktrees/dotfiles/git-alias"),
+			path: resolve("/Users/testuser/worktrees/repo/git-alias"),
 			head: "62bf5364e4bded05975ac480397dc2707aa8edfa",
 			branch: "git-alias",
 			isMain: false,
@@ -71,17 +71,17 @@ prunable gitdir file points to non-existent location
 	});
 
 	it("finds the main worktree", () => {
-		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/zle/dotfiles");
+		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/testuser/repo");
 		const main = findMainWorktree(worktrees);
 		expect(main).toBeDefined();
 		expect(main?.isMain).toBe(true);
-		expect(main?.path).toBe(resolve("/Users/zle/dotfiles"));
+		expect(main?.path).toBe(resolve("/Users/testuser/repo"));
 	});
 
 	it("finds the current worktree", () => {
 		const worktrees = parseGitWorktreesPorcelain(
 			mockPorcelain,
-			"/Users/zle/.herdr/worktrees/dotfiles/git-alias",
+			"/Users/testuser/worktrees/repo/git-alias",
 		);
 		const current = findCurrentWorktree(worktrees);
 		expect(current).toBeDefined();
@@ -90,11 +90,11 @@ prunable gitdir file points to non-existent location
 	});
 
 	it("resolves worktree by branch name", () => {
-		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/zle/dotfiles");
+		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/testuser/repo");
 
 		const match = findWorktreeByInput("git-alias", worktrees);
 		expect(match).toBeDefined();
-		expect(match?.path).toBe(resolve("/Users/zle/.herdr/worktrees/dotfiles/git-alias"));
+		expect(match?.path).toBe(resolve("/Users/testuser/worktrees/repo/git-alias"));
 
 		const caseMatch = findWorktreeByInput("GIT-ALIAS", worktrees);
 		expect(caseMatch).toBeDefined();
@@ -102,23 +102,23 @@ prunable gitdir file points to non-existent location
 	});
 
 	it("resolves worktree by folder name / basename", () => {
-		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/zle/dotfiles");
+		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/testuser/repo");
 
 		const match = findWorktreeByInput("detached-fix", worktrees);
 		expect(match).toBeDefined();
-		expect(match?.path).toBe(resolve("/Users/zle/.herdr/worktrees/dotfiles/detached-fix"));
+		expect(match?.path).toBe(resolve("/Users/testuser/worktrees/repo/detached-fix"));
 	});
 
 	it("resolves worktree by absolute path", () => {
-		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/zle/dotfiles");
+		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/testuser/repo");
 
-		const match = findWorktreeByInput("/Users/zle/dotfiles", worktrees);
+		const match = findWorktreeByInput("/Users/testuser/repo", worktrees);
 		expect(match).toBeDefined();
 		expect(match?.isMain).toBe(true);
 	});
 
 	it("returns undefined when worktree is not found", () => {
-		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/zle/dotfiles");
+		const worktrees = parseGitWorktreesPorcelain(mockPorcelain, "/Users/testuser/repo");
 		expect(findWorktreeByInput("non-existent", worktrees)).toBeUndefined();
 		expect(findWorktreeByInput("", worktrees)).toBeUndefined();
 	});

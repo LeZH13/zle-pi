@@ -7,7 +7,7 @@
     "pi-package"
   ],
   "author": "zle13",
-  "license": "MIT",
+  "license": "SEE LICENSE IN NOTICE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/LeZH13/zle-pi.git",
@@ -17,7 +17,9 @@
     "extensions",
     "snippets",
     "audit",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "publishConfig": {
     "access": "public"

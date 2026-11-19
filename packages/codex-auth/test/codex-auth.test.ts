@@ -1,5 +1,5 @@
 import * as childProcess from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -35,8 +35,12 @@ describe("codex-auth extension", () => {
 	let registeredCommands: Map<string, any>;
 	let registeredListeners: Map<string, any>;
 	let mockPi: ExtensionAPI;
+	let profile: string;
 
 	beforeEach(() => {
+		profile = mkdtempSync(join(tmpdir(), "codex-auth-profile-"));
+		vi.stubEnv("CODEX_HOME", join(profile, "codex"));
+		vi.stubEnv("PI_CODING_AGENT_DIR", join(profile, "pi"));
 		registeredCommands = new Map();
 		registeredListeners = new Map();
 
@@ -54,6 +58,8 @@ describe("codex-auth extension", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
+		rmSync(profile, { recursive: true, force: true });
 		resetCommandExecutor();
 	});
 
@@ -294,7 +300,7 @@ describe("codex-auth extension", () => {
 		const mockAccount = {
 			account_key: "acc-1",
 			alias: "work",
-			email: "lezh123456789@gmail.com",
+			email: "user@example.com",
 			chatgpt_account_id: "id-work-123",
 			plan: "plus",
 			last_usage: {
@@ -349,6 +355,9 @@ describe("codex-auth extension", () => {
 		});
 
 		it("ensures widget render() lines never exceed width including divider", () => {
+			const accounts = join(profile, "codex", "accounts");
+			mkdirSync(accounts, { recursive: true });
+			writeFileSync(join(accounts, "registry.json"), JSON.stringify({ accounts: [mockAccount] }));
 			let capturedFactory: any;
 			const mockCtx = {
 				hasUI: true,

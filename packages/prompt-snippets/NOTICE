@@ -1,0 +1,12 @@
+@zle13/pi-prompt-snippets
+Copyright 2026 zle13
+
+The MIT license in LICENSE covers original contributions by zle13 only.
+No license for the upstream prompt-snippets material has been verified.
+
+Originally created by Amos Blomqvist:
+https://github.com/amosblomqvist/pi-config
+
+Modifications by zle13: standalone Pi package layout, bundled snippets,
+keybinding integration, in-menu snippet management, usage tracking, and
+session prompt audit tooling.

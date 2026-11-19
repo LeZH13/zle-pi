@@ -55,13 +55,7 @@ A responsive custom startup header extension for Pi Coding Agent featuring a dis
 
 ## Installation
 
-Install via Pi's package manager:
-
-```bash
-pi install npm:@zle13/pi-header
-```
-
-Or install locally from this repository:
+This extension is source-only. From the root of a local checkout:
 
 ```bash
 pi install -l ./packages/header
@@ -72,7 +66,7 @@ Or add to `~/.pi/agent/settings.json`:
 ```json
 {
   "packages": [
-    "../../zle_ws/zle-pi/packages/header"
+    "/path/to/zle-pi/packages/header"
   ]
 }
 ```
@@ -89,4 +83,4 @@ Then reload Pi with `/reload`.
 
 ## License
 
-MIT © zle13
+[MIT](./LICENSE) © zle13

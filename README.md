@@ -1,173 +1,175 @@
 # zle-pi
 
-Personal development workspace for building organized, independently installable [Pi](https://pi.dev) extensions, skills, prompt templates, and themes.
+Independently installable [Pi Coding Agent](https://pi.dev) extensions developed in an npm-workspace monorepo. Each package under [`packages/`](./packages) is self-contained with its own Pi manifest, runtime dependencies, tests, and documentation.
 
-This repository is intended to be an npm-workspace monorepo: each directory under `packages/` can be a focused Pi package with its own manifest, dependencies, tests, and documentation.
+## Extensions
 
-## Repository status
+| Package | Docs | npm | License | What it does |
+| --- | --- | --- | --- | --- |
+| **`@zle13/pi-bash-guard`** | [`packages/bash-guard`](./packages/bash-guard/README.md) | [![npm](https://img.shields.io/npm/v/@zle13/pi-bash-guard)](https://www.npmjs.com/package/@zle13/pi-bash-guard) | [MIT](./LICENSE) | Jev-backed safety guard and stuck-command watchdog for Pi's `bash` tool, plus session-owned background jobs (`background: true` or automatic 60s yield) with a live clickable job widget and `bash_jobs` tool. |
+| **`@zle13/pi-codex-auth`** | [`packages/codex-auth`](./packages/codex-auth/README.md) | [![npm](https://img.shields.io/npm/v/@zle13/pi-codex-auth)](https://www.npmjs.com/package/@zle13/pi-codex-auth) | [MIT](./LICENSE) | OpenAI Codex multi-account switcher and 5h/weekly quota monitor integrating [`@loongphy/codex-auth`](https://github.com/loongphy/codex-auth) with Pi's auth, footer, and below-editor quota bar. |
+| **`@zle13/pi-editor`** | [`packages/editor`](./packages/editor/README.md) | [![npm](https://img.shields.io/npm/v/@zle13/pi-editor)](https://www.npmjs.com/package/@zle13/pi-editor) | [MIT](./LICENSE) | Vim-style modal prompt editor with a top-border session-name badge, a thinking-color working border trail, and an inline `$$` picker to copy shell commands from recent assistant replies. |
+| **`@zle13/pi-footer`** | [`packages/footer`](./packages/footer/README.md) | [![npm](https://img.shields.io/npm/v/@zle13/pi-footer)](https://www.npmjs.com/package/@zle13/pi-footer) | [MIT](./LICENSE) | Responsive 3-line TUI footer (`starship` or `classic` style) showing Git status and line diffs, active toolchain, Codex quota, token/context/cache/speed/cost metrics, model & thinking level, extension statuses, and a live agent work timer (`◷`). |
+| **`@zle13/pi-header`** | [`packages/header`](./packages/header/README.md) | Source only (not yet on npm) | [MIT](./LICENSE) | Responsive startup header pairing an olive-green ASCII logo with live keybinding hints resolved from your active `KeybindingsManager`, expandable via `ctrl+o`. |
+| **`@zle13/pi-move`** | [`packages/move`](./packages/move/README.md) | [![npm](https://img.shields.io/npm/v/@zle13/pi-move)](https://www.npmjs.com/package/@zle13/pi-move) | [MIT](./LICENSE) | Switch working directories in place (`/move`) and resume, fork, or create sessions with native Git worktree discovery and main-checkout session inheritance. |
+| **`@zle13/pi-prompt-snippets`** | [`packages/prompt-snippets`](./packages/prompt-snippets/README.md) | [![npm](https://img.shields.io/npm/v/@zle13/pi-prompt-snippets)](https://www.npmjs.com/package/@zle13/pi-prompt-snippets) | [See notice](./packages/prompt-snippets/NOTICE) | Mix-and-match prompt rules (`Alt+S` or `/snippets`) that prepend or append to your next message and reset after sending, with in-menu editing (`Ctrl+E`) and session prompt auditing (`/snippets-audit`). |
+| **`@zle13/pi-recap`** | [`packages/recap`](./packages/recap/README.md) | [![npm](https://img.shields.io/npm/v/@zle13/pi-recap)](https://www.npmjs.com/package/@zle13/pi-recap) | [Apache-2.0](./packages/recap/LICENSE) | Concise progress recaps and next-step tips above the editor after idle time (or via `/recap`), plus automatic subject-focused session naming for new conversations (`/autoname`). |
+| **`@zle13/pi-todo`** | [`packages/todo`](./packages/todo/README.md) | [![npm](https://img.shields.io/npm/v/@zle13/pi-todo)](https://www.npmjs.com/package/@zle13/pi-todo) | [MIT](./packages/todo/LICENSE) | Session-scoped task tracking with a `todo` model tool (including `blockedBy` dependencies), `/todos` command, and a live collapsible/clickable progress panel above the editor. |
 
-The repository currently contains its development conventions and handbook. Workspace configuration and Pi packages can be added incrementally as the first resources are built.
+### Extension highlights
 
-## Planned layout
+- **[`@zle13/pi-bash-guard`](./packages/bash-guard/README.md)** — Intercepts risky `bash` tool calls (destructive file, Git, SQL, cloud/container, and redirect patterns) and scores irreversible-loss risk via **Jev** (TypeSafe System One, or rules-only fallback) under `ask` or enforced `deny` policy (`PI_BASH_GUARD_APPROVAL_MODE`). Periodically checks running commands for `stuck` or `looping` states (`ask`, `notify-only`, or `auto-stop` watchdog policies) while leaving healthy long-lived services alone. Adds `background` execution (`background: true` or automatic 60s yield on direct calls), a live above-editor job bar with a clickable dropdown and detail drawer, `bash_jobs` tool, `/bash-jobs`, `ctrl+shift+k`, and `/bash-guard`.
+- **[`@zle13/pi-codex-auth`](./packages/codex-auth/README.md)** — Connects Pi with [`@loongphy/codex-auth`](https://github.com/loongphy/codex-auth) (`~/.codex/accounts/`). Switch accounts interactively or by alias/index/previous (`-`) with `/codex-auth`, inspect 5-hour and weekly rate limits and credit balances, display a footer badge and subtle 2nd-line quota bar below the editor, watch external account switches live, and sync refreshed OAuth tokens bi-directionally.
+- **[`@zle13/pi-editor`](./packages/editor/README.md)** — Replaces the prompt editor with a focused Vim modal subset (`INSERT`/`NORMAL`, motions, counts, `dw`/`cw`/`dd`/`cc`/`D`/`C`, `u`/`ctrl+r` undo/redo, hardware block/beam cursor shapes). Renders the active session title on the top-right border, sweeps a synchronized thinking-color trail around the border while busy, and opens an inline shell-command copy picker when you type `$$` into an empty editor (or run `/copy-command`) to copy individual commands or whole shell fences from the last 10 assistant replies.
+- **[`@zle13/pi-footer`](./packages/footer/README.md)** — Renders a 3-line status footer configurable via `/footer` (`starship` or `classic` style): Line 1 shows repo/branch/status/diff metrics, active language runtime, and the `@zle13/pi-codex-auth` quota badge; Line 2 shows input/output tokens, context window usage (`◔ used/window`), cache hit rate, generation speed (`t/s`), session cost, and active model + thinking level; Line 3 shows statuses from other extensions (such as `@zle13/pi-bash-guard`) alongside a persistent active agent work timer (`◷`) that notifies elapsed work duration after each response.
+- **[`@zle13/pi-header`](./packages/header/README.md)** — Renders a side-by-side startup banner with an olive-green ASCII logo and live shortcut hints queried from Pi's `KeybindingsManager`. Press `ctrl+o` (or your configured expand key) to toggle the full 2-column shortcut reference, or run `/builtin-header` to restore Pi's default header for the session.
+- **[`@zle13/pi-move`](./packages/move/README.md)** — Run `/move`, `/move <branch>`, or `/move <path>` to switch directories without restarting Pi. Discovers Git worktrees, lets linked worktrees inherit and fork sessions from the main checkout, and supports forking the current conversation into a new directory with full message history.
+- **[`@zle13/pi-prompt-snippets`](./packages/prompt-snippets/README.md)** — Press `Alt+S` or run `/snippets` to toggle lightweight markdown rules that prepend or append to your next message and automatically reset after sending. Discovers bundled, global (`~/.pi/agent/snippets/`), and trusted project (`.pi/snippets/`) snippets, includes an in-menu editor (`Ctrl+E`) to create, override, hide, or delete snippets without leaving Pi, and provides `/snippets-audit` to analyze recent session prompts against snippet usage.
+- **[`@zle13/pi-recap`](./packages/recap/README.md)** — Generates a one-sentence summary of the session goal/state and a next-step tip above the editor after at least 3 user prompts and 2 minutes of uninterrupted idle time (or immediately via `/recap`), without polluting model context. Also gives new unnamed sessions a concise 3–6 word subject title after the first completed response (or on demand via `/autoname`).
+- **[`@zle13/pi-todo`](./packages/todo/README.md)** — Opt-in per session via `/todos`. When enabled, exposes a `todo` tool (`create`, `update`, `list`, `get`, `delete`, `clear` with `blockedBy` cycle validation and `activeForm` labels) and renders a live collapsible/clickable progress overlay above the editor reconstructed from session branch snapshots across `/reload`, resume, fork, and compaction.
 
-```text
-zle-pi/
-├── AGENTS.md
-├── README.md
-├── package.json                 # npm workspaces and repository-wide scripts
-├── packages/
-│   └── <package-name>/
-│       ├── package.json         # Pi manifest and package dependencies
-│       ├── README.md
-│       ├── extensions/
-│       │   ├── simple.ts
-│       │   └── complex/
-│       │       ├── index.ts
-│       │       └── helpers.ts
-│       ├── skills/
-│       │   └── <skill-name>/
-│       │       ├── SKILL.md
-│       │       ├── references/
-│       │       ├── scripts/
-│       │       └── assets/
-│       ├── prompts/
-│       ├── themes/
-│       └── test/
-└── shared/                      # proven cross-package fixtures/utilities
-```
+## Check what's published
 
-A package may expose a single resource or a cohesive bundle. Package-only implementation stays in that package; shared code is extracted only when multiple packages need the same maintained contract.
+Packages in this monorepo are versioned and published independently under the [`@zle13` npm scope](https://www.npmjs.com/search?q=%40zle13) and listed in the [Pi package gallery](https://pi.dev/packages) using the `"pi-package"` keyword:
 
-## Prerequisites
+- **Published on npm:** `@zle13/pi-bash-guard`, `@zle13/pi-codex-auth`, `@zle13/pi-editor`, `@zle13/pi-footer`, `@zle13/pi-move`, `@zle13/pi-prompt-snippets`, `@zle13/pi-recap`, and `@zle13/pi-todo` (the badges in the table above reflect the live npm version).
+- **Source-only (not yet published to npm):** `@zle13/pi-header` — try or install it from a local checkout.
+- **Workspace vs. npm versions:** Each `packages/<name>/package.json` tracks the current workspace version on `main`, which may include unreleased commits ahead of the latest npm tarball.
 
-- Node.js and npm
-- Pi installed and available as `pi`
-- A trusted checkout when loading project-local Pi resources
-
-Install Pi using the current instructions in the [official README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md).
-
-## Bootstrap
-
-Once the root workspace manifest exists:
+To check the live published version of any package (or compare all workspace packages against npm) from your terminal:
 
 ```bash
+# Check one package on npm
+npm view @zle13/pi-bash-guard version
+
+# Compare every workspace package in a local clone against npm
+for pkg in packages/*; do
+  name=$(node -p "require('./$pkg/package.json').name")
+  local_ver=$(node -p "require('./$pkg/package.json').version")
+  npm_ver=$(npm view "$name" version 2>/dev/null || echo "unpublished")
+  printf "%-28s workspace: %-8s npm: %s\n" "$name" "$local_ver" "$npm_ver"
+done
+```
+
+## Try or install
+
+### Prerequisites
+
+- **Node.js** and **npm**
+- **[Pi Coding Agent](https://pi.dev)** (`pi`) installed and available on your `PATH` (see the [official Pi README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md); `@zle13/pi-recap` requires Pi `1.0.2+`)
+- For **`@zle13/pi-codex-auth`** only: [`@loongphy/codex-auth`](https://github.com/loongphy/codex-auth) installed globally (`npm install -g @loongphy/codex-auth`)
+
+### Try an extension for one session
+
+Use `pi -e` (`--extension`) to load a package for a single run without modifying your settings:
+
+```bash
+# Try a published package directly from npm
+pi -e npm:@zle13/pi-bash-guard
+
+# Or try any package from a local clone of this repository
+pi -e ./packages/bash-guard
+pi -e ./packages/header
+```
+
+If you already have another extension installed that registers the same command or tool name (such as another `todo` or `recap` package), pass `-ne` (`--no-extensions`) to test the package in isolation:
+
+```bash
+pi -ne -e ./packages/todo
+```
+
+### Install from npm
+
+Install any published package into your personal Pi configuration (`~/.pi/agent/settings.json`):
+
+```bash
+pi install npm:@zle13/pi-bash-guard
+pi install npm:@zle13/pi-codex-auth
+pi install npm:@zle13/pi-editor
+pi install npm:@zle13/pi-footer
+pi install npm:@zle13/pi-move
+pi install npm:@zle13/pi-prompt-snippets
+pi install npm:@zle13/pi-recap
+pi install npm:@zle13/pi-todo
+```
+
+Add `-l` (`--local`) to write the package declaration to the current project's `.pi/settings.json` instead (loaded after project trust is granted), or append `@<version>` to pin a specific release.
+
+> **Migrating from `@lanlance/pi-recap`:** Remove the upstream package first (`pi remove npm:@lanlance/pi-recap`) before installing `@zle13/pi-recap` so both packages do not register `/recap` simultaneously.
+
+### Install from a local checkout
+
+To use `@zle13/pi-header` or run unreleased changes on `main`, clone this repository, install workspace dependencies once, and point `pi install` at the package directory:
+
+```bash
+git clone https://github.com/LeZH13/zle-pi.git
+cd zle-pi
 npm install
+
+# Install into ~/.pi/agent/settings.json
+pi install ./packages/header
+
+# Or install into the current project's .pi/settings.json
+pi install -l ./packages/header
+```
+
+Pi loads local packages directly from their resolved path without running `npm install` for them, so running `npm install` in the repository root ensures third-party runtime dependencies (such as `shell-quote`, `marked`, and `sh-syntax`) are available.
+
+### Manage installed packages
+
+```bash
+pi list                        # List configured packages
+pi update --extensions         # Reconcile and update installed packages
+pi remove npm:@zle13/pi-move   # Remove a configured package
+pi config                      # Enable or disable individual package resources
+```
+
+Inside an active Pi session, run `/reload` to pick up settings or local source changes; restart Pi when testing startup lifecycle or header changes.
+
+## Related project
+
+I use my fork of [pi-interactive-subagents](https://github.com/LeZH13/pi-interactive-subagents) to delegate work to subagents in Pi. It lives in a separate repository and is optional: none of the extensions here require it.
+
+## Contributor setup
+
+Clone the repository and install the monorepo dependencies from the workspace root:
+
+```bash
+git clone https://github.com/LeZH13/zle-pi.git
+cd zle-pi
+npm install
+```
+
+Run repository-wide checks:
+
+```bash
 npm test
 npm run typecheck
 ```
 
-Treat the scripts in the current `package.json` as authoritative; the commands above are the intended baseline, not a substitute for inspecting the manifest.
-
-## Creating a package
-
-1. Create `packages/<package-name>/package.json`.
-2. Add only the resource directories the package owns.
-3. Expose them with explicit `pi` manifest entries.
-4. Add the package's runtime dependencies, tests, and README.
-5. Load the local package in Pi and exercise each exposed resource.
-
-A typical package manifest is shaped like this:
-
-```json
-{
-  "name": "@zle-pi/example",
-  "version": "0.0.0",
-  "private": true,
-  "keywords": ["pi-package"],
-  "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-agent-core": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
-  },
-  "pi": {
-    "extensions": ["./extensions/*.ts", "./extensions/*/index.ts"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"],
-    "themes": ["./themes"]
-  }
-}
-```
-
-Adjust the manifest to expose exactly what the package contains. Keep `"private": true` for workspace-only packages; remove it before publishing a package to npm. Third-party runtime libraries belong in `dependencies`. Pi-provided core packages remain peer dependencies and are not bundled.
-
-If a distributed package re-exports resources from another Pi package, add that package to both `dependencies` and `bundledDependencies`, then reference its resources with explicit `node_modules/<package>/...` paths in the `pi` manifest. Pi packages have isolated module roots, so a separate installation is not a substitute for bundling the dependency.
-
-## Development loop
-
-### Test a package temporarily
+Work on and verify an individual package:
 
 ```bash
-pi -e ./packages/<package-name>
+# Run one package's test suite and typecheck
+npm test --workspace @zle13/pi-bash-guard
+npm run typecheck --workspace @zle13/pi-bash-guard
+
+# Inspect the files that will be included in the published npm tarball
+npm pack --dry-run --workspace @zle13/pi-bash-guard
+
+# Exercise the package live in Pi
+pi -e ./packages/bash-guard
 ```
 
-This is useful for a quick run without installing the package. Restart the run after source changes.
-
-### Install a package into project settings
-
-```bash
-pi install -l ./packages/<package-name>
-pi
-```
-
-After the project is trusted, project-local packages load from `.pi/settings.json`. Use `/reload` while iterating on auto-discovered project resources; restart Pi when a lifecycle or loading change needs a clean startup test.
-
-### Test one resource directly
-
-```bash
-pi -e ./packages/<package-name>/extensions/<extension>.ts
-pi --skill ./packages/<package-name>/skills/<skill>/SKILL.md
-pi --prompt-template ./packages/<package-name>/prompts/<template>.md
-pi --theme ./packages/<package-name>/themes/<theme>.json --use-theme <theme-name>
-```
-
-For `--use-theme`, `<theme-name>` is the `"name"` declared inside the theme JSON, which may differ from its filename.
-
-### Verify changes
-
-Use the scripts declared by the owning package and root workspace. The expected sequence is:
-
-1. Run the narrowest relevant Vitest test.
-2. Run the owning package's tests and typecheck.
-3. Run repository-wide tests and typecheck.
-4. Load the package in Pi and verify discovery plus user-visible behavior.
-5. Before release, inspect the package tarball and confirm every `pi` manifest path is included.
-
-## Resource notes
-
-### Extensions
-
-Pi loads TypeScript directly, so a compile step is not required for ordinary extension loading. Extensions can register tools, commands, event handlers, providers, and custom TUI components. Keep default views compact, make blocking work cancellable, truncate large tool output, and clean up session resources on shutdown.
-
-### Skills
-
-Each skill lives in its own directory with a `SKILL.md`. Its frontmatter needs a valid lowercase hyphenated `name` and a specific `description`; that description determines when Pi offers the skill to the model. Put branch-specific detail in linked references so the main workflow remains legible.
-
-### Prompt templates
-
-Prompt filenames become slash commands. Templates support optional `description` and `argument-hint` frontmatter plus positional/default argument expansion. Prompt discovery is non-recursive unless deeper files are explicitly exposed.
-
-### Themes
-
-Themes are JSON files with a unique name and the official theme schema. Test all message, markdown, tool, selection, and thinking-level states—not only the primary palette.
-
-## Official references
-
-Use the installed documentation matching the active Pi version when developing. Online references:
-
-- [Extensions](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/extensions.md)
-- [Extension examples](https://github.com/earendil-works/pi/tree/main/packages/coding-agent/examples/extensions)
-- [Skills](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md)
-- [Prompt templates](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/prompt-templates.md)
-- [Themes](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/themes.md)
-- [Pi packages](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/packages.md)
-- [TUI API](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/tui.md)
-
-## Working agreements
-
-Repository-specific agent instructions live in [`AGENTS.md`](./AGENTS.md). Package-specific behavior belongs in the owning package's README rather than being duplicated at the repository root.
+Each package under `packages/<name>/` owns its `package.json` (with explicit `pi` manifest paths and Pi host packages in `peerDependencies`), `extensions/`, package-local helpers (`src/` or `lib/`), `test/`, and `README.md`. See [`AGENTS.md`](./AGENTS.md) for architecture boundaries, Pi resource contracts, testing expectations, and versioning policy.
 
 ## License
 
-No license has been selected yet.
+Original project code in this repository is licensed under the **[MIT License](./LICENSE)** (`Copyright (c) 2026 zle13`).
+
+Packages adapted from upstream projects preserve their original licenses and attribution notices:
+
+- **[`@zle13/pi-recap`](./packages/recap)** — Licensed under **[Apache-2.0](./packages/recap/LICENSE)**. Adapted from [`L2ncE/pi-recap`](https://github.com/L2ncE/pi-recap) (`Copyright 2026 L2ncE`). See [`packages/recap/LICENSE`](./packages/recap/LICENSE) and [`packages/recap/NOTICE`](./packages/recap/NOTICE).
+- **[`@zle13/pi-todo`](./packages/todo)** — Licensed under **[MIT](./packages/todo/LICENSE)**. Adapted from [`@juicesharp/rpiv-todo`](https://github.com/juicesharp/rpiv-mono) (`Copyright 2026 juicesharp`). See [`packages/todo/LICENSE`](./packages/todo/LICENSE) and [`packages/todo/NOTICE`](./packages/todo/NOTICE).
+- **[`@zle13/pi-prompt-snippets`](./packages/prompt-snippets)** — [MIT](./packages/prompt-snippets/LICENSE) covers this project's original contributions only. See the [upstream attribution and license note](./packages/prompt-snippets/NOTICE). Adapted from original work by [Amos Blomqvist](https://github.com/amosblomqvist) in [`amosblomqvist/pi-config`](https://github.com/amosblomqvist/pi-config). See [`packages/prompt-snippets/README.md`](./packages/prompt-snippets/README.md).
+- **[`@zle13/pi-footer`](./packages/footer)** — Licensed under **[MIT](./LICENSE)**. Design inspired by [`@henryqw/pi-footer`](https://github.com/HenryQW/pi-harness/tree/main/extensions/pi-footer) and Starship prompt themes.

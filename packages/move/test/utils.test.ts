@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseSessionEntries } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	buildEmptyDirectorySessionOptions,
 	buildRecentDirectoryCompletions,
@@ -30,9 +30,11 @@ describe("utils", () => {
 	beforeEach(() => {
 		tempDir = join(tmpdir(), `pi-move-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
+		vi.stubEnv("PI_CODING_AGENT_DIR", join(tempDir, ".pi-agent"));
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		try {
 			rmSync(tempDir, { recursive: true, force: true });
 		} catch {}
@@ -310,8 +312,8 @@ describe("utils", () => {
 	});
 
 	describe("matchRecentDirectory", () => {
-		const display = "~/zle_ws/pi-interactive-subagents/";
-		const abs = "/Users/testuser/zle_ws/pi-interactive-subagents";
+		const display = "~/workspace/pi-interactive-subagents/";
+		const abs = "/Users/testuser/workspace/pi-interactive-subagents";
 
 		it("matches empty query", () => {
 			expect(matchRecentDirectory("", display, abs)).toBe(true);
@@ -321,23 +323,23 @@ describe("utils", () => {
 		it("matches substring in display path or basename", () => {
 			expect(matchRecentDirectory("interactive", display, abs)).toBe(true);
 			expect(matchRecentDirectory("subagents", display, abs)).toBe(true);
-			expect(matchRecentDirectory("zle_ws", display, abs)).toBe(true);
+			expect(matchRecentDirectory("workspace", display, abs)).toBe(true);
 			expect(matchRecentDirectory("pi", display, abs)).toBe(true);
 		});
 
 		it("matches path prefix", () => {
-			expect(matchRecentDirectory("~/zle", display, abs)).toBe(true);
+			expect(matchRecentDirectory("~/work", display, abs)).toBe(true);
 			expect(matchRecentDirectory("/Users/testuser", display, abs)).toBe(true);
 		});
 
 		it("matches regex pattern", () => {
 			expect(matchRecentDirectory("pi-.*subagents", display, abs)).toBe(true);
-			expect(matchRecentDirectory("zle.*sub", display, abs)).toBe(true);
+			expect(matchRecentDirectory("work.*sub", display, abs)).toBe(true);
 		});
 
 		it("matches fuzzy subsequence", () => {
 			expect(matchRecentDirectory("pisub", display, abs)).toBe(true);
-			expect(matchRecentDirectory("zwpi", display, abs)).toBe(true);
+			expect(matchRecentDirectory("wspi", display, abs)).toBe(true);
 		});
 
 		it("safely handles invalid regex pattern without throwing", () => {

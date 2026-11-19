@@ -2,7 +2,7 @@
 
 Give the model a task list you can see. This package adds a `todo` tool, a
 `/todos` command, and a live collapsible panel above the editor to
-[Pi Agent](https://github.com/badlogic/pi-mono). The list is rebuilt from the
+[Pi Agent](https://github.com/earendil-works/pi). The list is rebuilt from the
 session branch, so it survives `/reload` and compaction.
 
 Adapted from [`@juicesharp/rpiv-todo`](https://www.npmjs.com/package/@juicesharp/rpiv-todo)
@@ -12,15 +12,13 @@ guard.
 
 ## Install
 
-Not yet published to npm. Until release, run it locally from this checkout:
+Install with `pi install npm:@zle13/pi-todo`, or try it locally from this checkout:
 
 ```sh
 pi -ne -e ./packages/todo          # one-off trial (--no-extensions avoids tool-name
                                    # conflicts with an already-installed todo package)
 pi install -l ./packages/todo      # or install into this project's settings (-l = local)
 ```
-
-Once published, it will be installable with `pi install npm:@zle13/pi-todo`.
 Restart your Pi session after installing.
 
 ## Usage
@@ -33,10 +31,10 @@ Restart your Pi session after installing.
 | `/todos status` | Reports tracking state (on/off, collapsed/expanded) and the task list grouped by status |
 | `/todos collapse` | Collapses the panel to its one-line summary |
 | `/todos expand` | Expands the panel to full rows |
-| `/todos view` | Toggles between collapsed and expanded |
 
 Anything else prints usage. Typing `/todos` offers prefix-filtered argument
-completions for `status`, `collapse`, `expand`, and `view`. A toggle never
+completions for `status`, `collapse`, and `expand`. In TUI mode, you can also
+click the overlay header to toggle between collapsed and expanded. A toggle never
 launches an agent turn.
 
 ### Session-scoped enablement
