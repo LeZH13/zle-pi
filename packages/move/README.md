@@ -1,11 +1,12 @@
 # @zle13/pi-move
 
-Pi extension to switch working directories and resume, fork, or create sessions—with native Git worktree support.
+Switch working directories in place in [Pi Coding Agent](https://pi.dev) and resume, fork, or create sessions—with native Git worktree discovery.
 
 ## Installation
 
 ```bash
 pi install npm:@zle13/pi-move
+pi -e npm:@zle13/pi-move   # try for one session
 ```
 
 ## Usage
@@ -13,15 +14,15 @@ pi install npm:@zle13/pi-move
 ```text
 /move              # Open interactive hub (worktrees, recent dirs, inherit from main)
 /move <branch>     # Jump directly to a worktree by branch name (e.g. /move feat-auth)
-/move <path>       # Move to any directory with smart history autocomplete
+/move <path>       # Move to any directory with history and path autocomplete
 ```
 
 ## Features
 
-- **Interactive Hub:** Run `/move` without arguments to pick from repository Git worktrees and recent directories.
-- **Worktree Session Inheritance:** When inside a linked worktree (e.g. via Herdr), run `/move` to adopt and fork any session from the main repo checkout.
-- **Seamless Context Forking:** Moving to an empty worktree or directory lets you fork your current conversation, rebinding `cwd` while preserving complete message history.
-- **Smart Autocomplete:** Surfaces worktree branches, recent directories, and filesystem paths as you type.
+- **Interactive hub:** run `/move` without arguments to pick from repository Git worktrees and recent directories.
+- **Worktree session inheritance:** inside a linked worktree (e.g. via `git worktree`), adopt and fork any session from the main checkout.
+- **Context forking:** moving to an empty worktree or directory lets you fork the current conversation, rebinding `cwd` while preserving message history.
+- **Smart autocomplete:** surfaces worktree branches, recent directories, and filesystem paths as you type.
 
 ## License
 

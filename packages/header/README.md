@@ -1,24 +1,10 @@
 # @zle13/pi-header
 
-A responsive custom startup header extension for Pi Coding Agent featuring a distinctive olive green ASCII logo, a balanced side-by-side text layout, and expandable keybinding hints that dynamically reflect your active keybindings.
+A responsive custom startup header for [Pi Coding Agent](https://pi.dev) pairing an olive-green ASCII logo with live keybinding hints resolved from your active `KeybindingsManager`, expandable via `ctrl+o`.
 
----
+## Visual preview
 
-## Features
-
-- **Side-by-Side Card Layout**: Places the startup title, keybinding shortcuts, expansion hints, and onboarding guidance directly to the right of the ASCII art, spanning rows 0 to 9 to form a balanced banner.
-- **True Keybindings Resolution**: Queries Pi's live `KeybindingsManager` in real-time. Customized keybindings (from `~/.pi/agent/keybindings.json`) are automatically reflected (e.g. `option+p/option+n` for model cycling, `escape/ctrl+g` for interrupt, `option+e` for external editor). Unbound actions are safely omitted.
-- **Pi 1.0 Expandable Help (`ctrl+o`)**:
-  - **Compact Mode (Default)**: Displays single-line quick actions, the startup expansion hint, and onboarding text.
-  - **Expanded Mode**: Expands into a 2-column matrix of all 19 keyboard shortcuts when `ctrl+o` (`app.tools.expand`) is pressed.
-- **Narrow Terminal Fallback**: Automatically stacks the layout vertically when terminal width is below 85 columns to avoid clipping.
-- **Restore Command**: Run `/builtin-header` to restore Pi's default startup header at any time during a session.
-
----
-
-## Visual Preview
-
-### Compact Mode (Default)
+### Compact *(default)*
 
 ```text
    ███████████████████████████╗     pi v1.0.0
@@ -33,7 +19,7 @@ A responsive custom startup header extension for Pi Coding Agent featuring a dis
    ╚═══════════╝  ╚═══════════╝     Ask it how to use or extend Pi.
 ```
 
-### Expanded Mode (`ctrl+o`)
+### Expanded (`ctrl+o`)
 
 ```text
    ███████████████████████████╗     pi v1.0.0
@@ -51,36 +37,29 @@ A responsive custom startup header extension for Pi Coding Agent featuring a dis
                                   Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.
 ```
 
----
+## Features
+
+- **Live keybindings:** reads Pi's active `KeybindingsManager` (including customizations in `~/.pi/agent/keybindings.json`) and omits unbound actions automatically.
+- **Expandable help (`ctrl+o`):** starts compact and toggles a 2-column reference of all 19 shortcuts when `ctrl+o` (`app.tools.expand`) is pressed.
+- **Responsive layout:** displays side-by-side on wide terminals and stacks vertically below 85 columns to prevent clipping.
 
 ## Installation
 
-This extension is source-only. From the root of a local checkout:
+Source-only (not yet published to npm). From a local checkout of `zle-pi`:
 
 ```bash
-pi install -l ./packages/header
+pi install ./packages/header   # personal (~/.pi/agent/settings.json)
+pi -e ./packages/header        # try for one session
 ```
 
-Or add to `~/.pi/agent/settings.json`:
-
-```json
-{
-  "packages": [
-    "/path/to/zle-pi/packages/header"
-  ]
-}
-```
-
-Then reload Pi with `/reload`.
-
----
+Restart Pi to see the updated startup header.
 
 ## Commands
 
-- `/builtin-header`: Restores Pi's built-in header for the current session.
-
----
+| Command | Description |
+| --- | --- |
+| `/builtin-header` | Restore Pi's built-in startup header for the current session |
 
 ## License
 
-[MIT](./LICENSE) © zle13
+MIT — see [LICENSE](./LICENSE).
