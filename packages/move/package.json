@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-move",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pi extension to move between working directories with session resume or new session creation",
   "type": "module",
   "keywords": [

@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-codex-auth",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "OpenAI Codex multi-account switcher and quota monitor extension for Pi Coding Agent",
   "type": "module",
   "keywords": [

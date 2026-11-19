@@ -1,6 +1,6 @@
 {
   "name": "@zle13/pi-bash-guard",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Guarded background bash for Pi: risky-command approvals, a stuck-command watchdog, and session-owned async jobs.",
   "type": "module",
   "keywords": [
